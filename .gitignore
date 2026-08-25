@@ -1,0 +1,34 @@
+# macOS
+.DS_Store
+._*
+
+# Editor state
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Python / uv artifacts (if testing locally)
+__pycache__/
+*.pyc
+.venv/
+.uv/
+uv.lock
+
+# LiteLLM runtime (never commit user installs)
+.litellm/
+
+# Logs
+*.log
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Antigravity / Gemini agent state
+.gemini/
+
+# Scratch files
+docs/superpowers/plans/scratch/
