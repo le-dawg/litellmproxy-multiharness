@@ -1,23 +1,105 @@
 # litellm-simplified
 
-One-command installer for [LiteLLM Proxy](https://github.com/BerriAI/litellm) as a persistent, rootless macOS user service.
+Production-hardened local proxy service for [LiteLLM](https://github.com/BerriAI/litellm) running as a persistent, rootless macOS user `launchd` daemon on `127.0.0.1:5596`.
 
-## What it does
+Specifically optimized for seamless integration between **Codex Desktop**, **Claude Code**, and **Azure OpenAI GPT-5.4** via the Responses API (`/v1/responses`).
 
-- Bootstraps a pinned `uv` venv with `litellm[proxy]==1.89.0`
-- Registers a `launchd` LaunchAgent for auto-start on login + crash recovery
-- Binds to `127.0.0.1:5596` — localhost only, no root required
-- Supports idempotent re-runs and clean uninstall
+---
 
-## Quick start
+## Key Capabilities & Hardening
+
+1. **Responses API Parameter Sanitization (`tool_choice_guard.py`):**
+   - **`stop_sequences` Stripping:** Azure Responses API rejects `stop_sequences` with HTTP 400. The guard silently strips this parameter for `/v1/responses` calls.
+   - **Orphan `tool_choice` Stripping:** Azure strictly forbids `tool_choice` unless `tools` are present. The guard automatically removes `tool_choice` and `parallel_tool_calls` when tools are empty or null.
+   - **Orphan Tool Call Output Cleanup:** When Codex Desktop's auto-compact truncation drops earlier `function_call` turns while retaining downstream `function_call_output` items, Azure rejects the request with HTTP 400 (`Invalid Value: 'input.call_id'. Function call output requires call_id.`). The pre-call hook sanitizes `input` arrays by dropping orphaned outputs before dispatching upstream.
+
+2. **Cosmetic Error Leak Suppression:**
+   - LiteLLM's `router.py` unconditionally injects `. Received Model Group=... Available Model Group Fallbacks=None` onto all unhandled errors when `expose_router_debug_in_errors` is true.
+   - Setting `expose_router_debug_in_errors: false` in `config.yaml` suppresses this red-herring message and reveals the true underlying error (DNS drop, rate limit, or context overflow).
+
+3. **DarkWake Network Reconnection Resilience:**
+   - macOS DarkWake from Deep Idle causes scheduled tasks to fire before the Wi-Fi physical link is re-associated (`[Errno 8] nodename nor servname provided, or not known`).
+   - Configured `router_settings` (`num_retries: 3`, `retry_after: 3`, `allowed_fails_policy: {RateLimitError: 5}`) bridges the 2–5 second DHCP reconnection window cleanly.
+
+4. **Transport Reliability:**
+   - Enforces `DISABLE_AIOHTTP_TRANSPORT=true` (using `httpx`) to prevent truncated chunked responses on streaming Responses API calls.
+
+---
+
+## Directory Layout
+
+```text
+litellm-simplified/
+├── config/
+│   └── config.yaml                      # Hardened proxy configuration template
+├── docs/
+│   ├── design/
+│   │   ├── azure-gpt54-proxy-hardening-plan.md  # 2026-09-14 hardening implementation plan
+│   │   ├── community-install-lifecycle.md
+│   │   ├── launchagent-design.md
+│   │   └── launchagent-implementation-plan.md
+│   ├── reference/
+│   │   ├── optimized-goal-prompt.md
+│   │   ├── oss-install-script-best-practices.md
+│   │   └── proxy-install-notes.md
+│   └── reports/
+│       ├── copilot-adversarial-review.md         # Adversarial review by Copilot CLI + Claude Sonnet 5
+│       ├── launchagent-implementation-report.md
+│       └── rca-azure-gpt54-router-fallbacks.md   # Comprehensive Root Cause Analysis
+├── service/
+│   └── bin/
+│       ├── preflight-litellm.sh         # Validates credentials & config translation contracts
+│       ├── smoke-anthropic-to-azure.sh  # Live translation smoke test
+│       ├── start-litellm.sh             # Launchd execution wrapper
+│       └── test-launchagent-hardening.sh# Daemon revival & sleep assertion test
+├── tests/
+│   ├── test_config_validation.py        # Configuration hardening assertions
+│   ├── test_live_proxy.py               # Live proxy health & error suppression tests
+│   └── test_tool_choice_guard.py        # Unit tests for parameter sanitization guard
+├── litellm-proxy-install.sh             # Self-contained installer
+├── pyproject.toml                       # Python project configuration (uv managed)
+├── tool_choice_guard.py                 # Active pre-call callback guard
+└── README.md
+```
+
+---
+
+## Quick Start
+
+### Installation
 
 ```bash
 chmod +x litellm-proxy-install.sh
 ./litellm-proxy-install.sh
 ```
 
-## Documentation
+### Running Tests
 
-- **Design:** [`docs/design/`](docs/design/) — architecture decisions, specs, implementation plans
-- **Reference:** [`docs/reference/`](docs/reference/) — best practices, operator notes, prompts
-- **Reports:** [`docs/reports/`](docs/reports/) — post-mortems, audit results
+All tests are managed via `uv`:
+
+```bash
+uv run pytest tests/ -v
+```
+
+### Managing the Service
+
+- **Check Health:**
+  ```bash
+  curl http://127.0.0.1:5596/health
+  ```
+- **Restart / Reload Daemon:**
+  ```bash
+  launchctl kickstart -k gui/$(id -u)/com.thedawgctor.litellm-proxy
+  ```
+- **Inspect Logs:**
+  ```bash
+  tail -f ~/.litellm/service/logs/litellm.stderr.log
+  ```
+
+---
+
+## Forensic Analysis & Learnings
+
+- **Full RCA:** Read [`docs/reports/rca-azure-gpt54-router-fallbacks.md`](docs/reports/rca-azure-gpt54-router-fallbacks.md) for forensic evidence detailing the string mutation bug in `router.py`, the macOS `DarkWake from Deep Idle` timing analysis, and the Azure Responses API schema breakdown.
+- **Adversarial Verification:** Read [`docs/reports/copilot-adversarial-review.md`](docs/reports/copilot-adversarial-review.md) for the critique generated by Claude Sonnet 5 via GitHub Copilot CLI.
+- **Hardening Plan:** Read [`docs/design/azure-gpt54-proxy-hardening-plan.md`](docs/design/azure-gpt54-proxy-hardening-plan.md) for the phased task list.

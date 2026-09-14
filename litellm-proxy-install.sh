@@ -14,7 +14,7 @@ DEFAULT_WRAPPER_PATH="$DEFAULT_SERVICE_HOME/bin/start-litellm.sh"
 DEFAULT_LABEL="com.thedawgctor.litellm-proxy"
 DEFAULT_HOST="127.0.0.1"
 DEFAULT_PORT="5596"
-DEFAULT_LITELLM_VERSION="1.89.0"
+DEFAULT_LITELLM_VERSION="1.95.1"
 DEFAULT_PYTHON_VERSION="3.14"
 DEFAULT_LAUNCHAGENTS_DIR="$HOME/Library/LaunchAgents"
 
@@ -265,6 +265,7 @@ if [ ! -f "$config_path" ]; then
 fi
 
 /bin/mkdir -p "\$LOG_HOME" "\$RUN_HOME"
+export DISABLE_AIOHTTP_TRANSPORT="\${DISABLE_AIOHTTP_TRANSPORT:-true}"
 cd "\$SERVICE_HOME"
 
 exec "\$UV_BIN" run litellm \\
@@ -279,12 +280,37 @@ write_stub_config() {
   config_path="$1"
   ensure_parent_dir "$config_path"
   cat >"$config_path" <<'EOF'
+litellm_settings:
+  drop_params: true
+  expose_router_debug_in_errors: false
+  callbacks:
+    - tool_choice_guard.proxy_guard
+
+router_settings:
+  num_retries: 3
+  retry_after: 3
+  allowed_fails_policy:
+    RateLimitError: 5
+
 model_list:
   - model_name: example-model
     litellm_params:
       model: azure/example-model
       api_key: os.environ/AZURE_OPENAI_API_KEY
 EOF
+}
+
+install_guard() {
+  litellm_home="$1"
+  script_dir="$(dirname "$0")"
+  guard_src="$script_dir/tool_choice_guard.py"
+  guard_dst="$litellm_home/tool_choice_guard.py"
+
+  if [ -f "$guard_src" ] && [ ! -f "$guard_dst" ]; then
+    ensure_parent_dir "$guard_dst"
+    /bin/cp "$guard_src" "$guard_dst"
+    say "Installed parameter sanitization guard to $guard_dst"
+  fi
 }
 
 write_plist() {
@@ -621,6 +647,7 @@ case "$launch_mode_choice" in
     ;;
 esac
 
+install_guard "$LITELLM_HOME"
 write_pyproject "$PYPROJECT_PATH" "$SERVICE_PROJECT_NAME" "$LITELLM_VERSION" "$PYTHON_VERSION"
 write_wrapper "$WRAPPER_PATH" "$LITELLM_HOME" "$SERVICE_HOME" "$CONFIG_PATH" "$HOST" "$PORT" "$UV_BIN"
 
