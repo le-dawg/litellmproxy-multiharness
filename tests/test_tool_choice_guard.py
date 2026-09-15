@@ -3,10 +3,10 @@ import pytest
 import sys
 from pathlib import Path
 
-# Add repository root and ~/.litellm to python path
+# Add ~/.litellm and repository root to python path (repo_root takes priority)
 repo_root = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(repo_root))
 sys.path.insert(0, str(Path.home() / ".litellm"))
+sys.path.insert(0, str(repo_root))
 
 from tool_choice_guard import StripOrphanToolChoiceGuard
 
@@ -104,3 +104,38 @@ async def test_sanitize_responses_input_drops_orphaned_function_call_output():
     assert "call_orphaned_123" not in call_ids, "Orphaned function_call_output must be stripped"
     assert "call_valid_456" in call_ids, "Valid paired function_call must be preserved"
     assert len(sanitized_input) == 3
+
+
+@pytest.mark.asyncio
+async def test_strip_call_type_from_request_data():
+    guard = StripOrphanToolChoiceGuard()
+    payload = {
+        "model": "azure/gpt-5.4",
+        "call_type": "anthropic_messages",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    result = await guard.async_pre_call_hook(
+        user_api_key_dict={},
+        cache=None,
+        data=payload,
+        call_type="anthropic_messages",
+    )
+    assert "call_type" not in result, "call_type must be stripped to prevent Azure 400 error"
+
+
+@pytest.mark.asyncio
+async def test_strip_tool_choice_in_anthropic_messages_when_no_tools():
+    guard = StripOrphanToolChoiceGuard()
+    payload = {
+        "model": "azure/gpt-5.4",
+        "tools": [],
+        "tool_choice": {"type": "auto"},
+        "messages": [{"role": "user", "content": "search web"}],
+    }
+    result = await guard.async_pre_call_hook(
+        user_api_key_dict={},
+        cache=None,
+        data=payload,
+        call_type="anthropic_messages",
+    )
+    assert "tool_choice" not in result, "tool_choice must be stripped when tools is empty in anthropic_messages"

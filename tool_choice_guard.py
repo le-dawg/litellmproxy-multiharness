@@ -146,6 +146,16 @@ class StripOrphanToolChoiceGuard(CustomLogger):
         if not isinstance(data, dict):
             return data
 
+        # --- Universal parameter sanitizers for Azure OpenAI ---
+        # Azure OpenAI rejects 'call_type' with HTTP 400
+        if "call_type" in data:
+            data.pop("call_type", None)
+            verbose_proxy_logger.debug(
+                "StripOrphanToolChoiceGuard removed unsupported 'call_type' (call_type=%s, model=%s)",
+                call_type,
+                data.get("model"),
+            )
+
         # --- Responses API input sanitizer ---
         # For /v1/responses calls, data contains an "input" field (list of items)
         if call_type in ("aresponses", "_aresponses_websocket", "responses"):
@@ -171,26 +181,22 @@ class StripOrphanToolChoiceGuard(CustomLogger):
                 data.get("model"),
             )
 
-        # --- tool_choice guard (existing logic) ---
-        if "tool_choice" not in data and "parallel_tool_calls" not in data:
-            return data
-
-        if self._has_tools(data.get("tools")):
-            return data
-
-        stripped = False
-        for key in ("tool_choice", "parallel_tool_calls"):
-            if key in data:
-                data.pop(key, None)
-                stripped = True
-
-        if stripped:
-            verbose_proxy_logger.debug(
-                "StripOrphanToolChoiceGuard removed tool params without tools "
-                "(call_type=%s, model=%s)",
-                call_type,
-                data.get("model"),
-            )
+        # --- tool_choice guard across all endpoints ---
+        if "tool_choice" in data or "parallel_tool_calls" in data:
+            tools = data.get("tools")
+            if not self._has_tools(tools):
+                stripped = False
+                for key in ("tool_choice", "parallel_tool_calls"):
+                    if key in data:
+                        data.pop(key, None)
+                        stripped = True
+                if stripped:
+                    verbose_proxy_logger.debug(
+                        "StripOrphanToolChoiceGuard removed tool params without tools "
+                        "(call_type=%s, model=%s)",
+                        call_type,
+                        data.get("model"),
+                    )
 
         return data
 
