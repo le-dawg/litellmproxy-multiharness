@@ -6,7 +6,9 @@ litellm_settings:
   model_alias_map:
     claude-sonnet-5: claude-gpt-5
     claude-sonnet-5[1m]: claude-gpt-5
+    claude-sonnet-4-6: claude-gpt-5
     claude-sonnet-4-5: claude-gpt-5
+    claude-haiku-4-5-20251001: claude-gpt-5
     claude-gpt-5[1m]: claude-gpt-5
     claude-mythos-5: claude-gpt-5
     antigravity: antigravity-flash
@@ -17,15 +19,12 @@ router_settings:
   retry_after: 3
   allowed_fails_policy:
     RateLimitError: 5
+  model_group_alias:
+    "claude-sonnet-5": "claude-gpt-5"
+    "claude-sonnet-4-6": "claude-gpt-5"
+    "claude-haiku-4-5-20251001": "claude-gpt-5"
 
 model_list:
-  - model_name: claude-sonnet-4-5
-    litellm_params:
-      model: azure/gpt-5.4
-      api_base: https://regent-ai-dev.cognitiveservices.azure.com
-      api_version: "2025-04-01-preview"
-      api_key: os.environ/AZURE_OPENAI_API_KEY
-      base_model: gpt-5.4
   - model_name: claude-gpt-5
     litellm_params:
       model: azure/gpt-5.4
@@ -33,11 +32,53 @@ model_list:
       api_version: "2025-04-01-preview"
       api_key: os.environ/AZURE_OPENAI_API_KEY
       base_model: gpt-5.4
+
+  - model_name: claude-sonnet-5
+    litellm_params:
+      model: azure/gpt-5.4
+      api_base: https://regent-ai-dev.cognitiveservices.azure.com
+      api_version: "2025-04-01-preview"
+      api_key: os.environ/AZURE_OPENAI_API_KEY
+      base_model: gpt-5.4
+
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: azure/gpt-5.4
+      api_base: https://regent-ai-dev.cognitiveservices.azure.com
+      api_version: "2025-04-01-preview"
+      api_key: os.environ/AZURE_OPENAI_API_KEY
+      base_model: gpt-5.4
+
+  - model_name: claude-sonnet-4-5
+    litellm_params:
+      model: azure/gpt-5.4
+      api_base: https://regent-ai-dev.cognitiveservices.azure.com
+      api_version: "2025-04-01-preview"
+      api_key: os.environ/AZURE_OPENAI_API_KEY
+      base_model: gpt-5.4
+
+  - model_name: claude-haiku-4-5-20251001
+    litellm_params:
+      model: azure/gpt-5.4
+      api_base: https://regent-ai-dev.cognitiveservices.azure.com
+      api_version: "2025-04-01-preview"
+      api_key: os.environ/AZURE_OPENAI_API_KEY
+      base_model: gpt-5.4
+
+  - model_name: "claude-*"
+    litellm_params:
+      model: azure/gpt-5.4
+      api_base: https://regent-ai-dev.cognitiveservices.azure.com
+      api_version: "2025-04-01-preview"
+      api_key: os.environ/AZURE_OPENAI_API_KEY
+      base_model: gpt-5.4
+
   - model_name: antigravity-flash
     litellm_params:
       model: openai/antigravity-flash
       api_base: http://127.0.0.1:8788/v1
       api_key: sk-antigravity-local
+
   - model_name: antigravity-pro
     litellm_params:
       model: openai/antigravity-pro
@@ -79,3 +120,6 @@ model_list:
       api_version: "2025-04-01-preview"
       api_key: os.environ/AZURE_OPENAI_API_KEY
       base_model: gpt-5.4
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
