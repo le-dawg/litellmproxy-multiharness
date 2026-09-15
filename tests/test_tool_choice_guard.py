@@ -139,3 +139,19 @@ async def test_strip_tool_choice_in_anthropic_messages_when_no_tools():
         call_type="anthropic_messages",
     )
     assert "tool_choice" not in result, "tool_choice must be stripped when tools is empty in anthropic_messages"
+
+
+@pytest.mark.asyncio
+async def test_async_pre_call_deployment_hook_strips_orphan_tool_choice():
+    guard = StripOrphanToolChoiceGuard()
+    kwargs = {
+        "model": "azure/gpt-5.4",
+        "call_type": "acompletion",
+        "tool_choice": "auto",
+        "tools": None,
+        "web_search_options": {},
+    }
+    result = await guard.async_pre_call_deployment_hook(kwargs)
+    assert "call_type" not in result
+    assert "tool_choice" not in result
+    assert result.get("web_search_options") == {}

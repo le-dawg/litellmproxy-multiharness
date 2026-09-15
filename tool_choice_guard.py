@@ -200,5 +200,31 @@ class StripOrphanToolChoiceGuard(CustomLogger):
 
         return data
 
+    async def async_pre_call_deployment_hook(
+        self, kwargs: dict[str, Any], call_type: Any = None
+    ) -> Optional[dict]:
+        """Sanitize deployment kwargs immediately before dispatching to provider."""
+        if not isinstance(kwargs, dict):
+            return kwargs
+
+        # Strip call_type if present
+        if "call_type" in kwargs:
+            kwargs.pop("call_type", None)
+
+        # Strip orphan tool_choice / parallel_tool_calls if tools is empty or None
+        # (Crucial when Anthropic web_search tools are extracted into web_search_options,
+        # leaving tools=None while tool_choice remains set to 'auto')
+        if "tool_choice" in kwargs or "parallel_tool_calls" in kwargs:
+            tools = kwargs.get("tools")
+            if not self._has_tools(tools):
+                kwargs.pop("tool_choice", None)
+                kwargs.pop("parallel_tool_calls", None)
+                verbose_proxy_logger.debug(
+                    "StripOrphanToolChoiceGuard [deployment_hook]: removed tool_choice without tools"
+                )
+
+        return kwargs
+
 
 proxy_guard = StripOrphanToolChoiceGuard()
+
