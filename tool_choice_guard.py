@@ -147,14 +147,16 @@ class StripOrphanToolChoiceGuard(CustomLogger):
             return data
 
         # --- Universal parameter sanitizers for Azure OpenAI ---
-        # Azure OpenAI rejects 'call_type' with HTTP 400
-        if "call_type" in data:
-            data.pop("call_type", None)
-            verbose_proxy_logger.debug(
-                "StripOrphanToolChoiceGuard removed unsupported 'call_type' (call_type=%s, model=%s)",
-                call_type,
-                data.get("model"),
-            )
+        # Azure OpenAI rejects 'call_type' and 'route_type' with HTTP 400
+        for bad_param in ("call_type", "route_type"):
+            if bad_param in data:
+                data.pop(bad_param, None)
+                verbose_proxy_logger.debug(
+                    "StripOrphanToolChoiceGuard removed unsupported '%s' (call_type=%s, model=%s)",
+                    bad_param,
+                    call_type,
+                    data.get("model"),
+                )
 
         # --- Responses API input sanitizer ---
         # For /v1/responses calls, data contains an "input" field (list of items)
@@ -207,9 +209,10 @@ class StripOrphanToolChoiceGuard(CustomLogger):
         if not isinstance(kwargs, dict):
             return kwargs
 
-        # Strip call_type if present
-        if "call_type" in kwargs:
-            kwargs.pop("call_type", None)
+        # Strip call_type and route_type if present
+        for bad_param in ("call_type", "route_type"):
+            if bad_param in kwargs:
+                kwargs.pop(bad_param, None)
 
         # Strip orphan tool_choice / parallel_tool_calls if tools is empty or None
         # (Crucial when Anthropic web_search tools are extracted into web_search_options,

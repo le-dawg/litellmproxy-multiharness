@@ -155,3 +155,37 @@ async def test_async_pre_call_deployment_hook_strips_orphan_tool_choice():
     assert "call_type" not in result
     assert "tool_choice" not in result
     assert result.get("web_search_options") == {}
+
+
+@pytest.mark.asyncio
+async def test_strip_route_type_from_request_data_and_deployment():
+    guard = StripOrphanToolChoiceGuard()
+    # Test pre_call hook
+    payload = {
+        "model": "azure/gpt-5.4",
+        "call_type": "anthropic_messages",
+        "route_type": "anthropic_messages",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    pre_result = await guard.async_pre_call_hook(
+        user_api_key_dict={},
+        cache=None,
+        data=payload,
+        call_type="anthropic_messages",
+    )
+    assert "call_type" not in pre_result
+    assert "route_type" not in pre_result
+
+    # Test deployment hook
+    kwargs = {
+        "model": "azure/gpt-5.4",
+        "call_type": "acompletion",
+        "route_type": "acompletion",
+        "tools": None,
+        "tool_choice": "auto",
+    }
+    dep_result = await guard.async_pre_call_deployment_hook(kwargs)
+    assert "call_type" not in dep_result
+    assert "route_type" not in dep_result
+    assert "tool_choice" not in dep_result
+
