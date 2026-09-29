@@ -8,6 +8,7 @@ def _verify_config_dict(config: dict):
         "expose_router_debug_in_errors must be false to prevent cosmetic fallback errors"
     )
     assert litellm_settings.get("drop_params") is True, "drop_params must remain true"
+    assert litellm_settings.get("request_timeout") == 20, "request_timeout must be 20 to prevent unbounded hangs"
 
     router_settings = config.get("router_settings", {})
     assert router_settings.get("num_retries", 0) >= 3, "num_retries must be >= 3"

@@ -1,6 +1,7 @@
 litellm_settings:
   drop_params: true
   expose_router_debug_in_errors: false
+  request_timeout: 20
   callbacks:
     - tool_choice_guard.proxy_guard
   model_alias_map:
