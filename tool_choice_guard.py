@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from typing import Any, List, Optional, Set
 
+import litellm
 from litellm._logging import verbose_proxy_logger
 from litellm.integrations.custom_logger import CustomLogger
+
+# Ensure Anthropic /v1/messages requests route through Chat Completions adapter
+litellm.use_chat_completions_url_for_anthropic_messages = True
 
 
 class StripOrphanToolChoiceGuard(CustomLogger):
