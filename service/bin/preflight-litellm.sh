@@ -57,18 +57,18 @@ litellm_settings = config.get("litellm_settings") or {}
 if litellm_settings.get("drop_params") is not True:
     errors.append("litellm_settings.drop_params must be true")
 
-required_aliases = {"claude-gpt-5", "claude-sonnet-4-5"}
+required_azure_aliases = {"inactive-azure-gpt-5.4", "inactive-azure-claude-gpt-5"}
 models = {}
 for item in config.get("model_list") or []:
     name = item.get("model_name")
     if name:
         models[name] = item.get("litellm_params") or {}
 
-missing = sorted(required_aliases - models.keys())
-if missing:
-    errors.append("missing required model aliases: " + ", ".join(missing))
+missing_azure = sorted(required_azure_aliases - models.keys())
+if missing_azure:
+    errors.append("missing required azure model aliases: " + ", ".join(missing_azure))
 
-for alias in sorted(required_aliases & models.keys()):
+for alias in sorted(required_azure_aliases & models.keys()):
     params = models[alias]
     if params.get("model") != expected_model:
         errors.append(f"{alias}: model must be {expected_model}")
@@ -78,6 +78,21 @@ for alias in sorted(required_aliases & models.keys()):
         errors.append(f"{alias}: api_version must be {expected_version}")
     if params.get("api_key") != expected_key_ref:
         errors.append(f"{alias}: api_key must be {expected_key_ref}")
+
+required_antigravity_models = {
+    "antigravity-flash-low",
+    "antigravity-flash-medium",
+    "antigravity-flash-high",
+    "antigravity-opus-4.6",
+}
+missing_antigravity = sorted(required_antigravity_models - models.keys())
+if missing_antigravity:
+    errors.append("missing required antigravity model aliases: " + ", ".join(missing_antigravity))
+
+for alias in sorted(required_antigravity_models & models.keys()):
+    params = models[alias]
+    if params.get("api_base") != "http://127.0.0.1:8788/v1":
+        errors.append(f"{alias}: api_base must be http://127.0.0.1:8788/v1")
 
 if errors:
     for error in errors:
