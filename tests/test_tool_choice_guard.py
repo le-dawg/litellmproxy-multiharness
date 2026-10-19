@@ -189,3 +189,169 @@ async def test_strip_route_type_from_request_data_and_deployment():
     assert "route_type" not in dep_result
     assert "tool_choice" not in dep_result
 
+
+@pytest.mark.asyncio
+async def test_detect_reasoning_effort_anthropic_thinking():
+    guard = StripOrphanToolChoiceGuard()
+    # budget_tokens <= 2048 -> "low"
+    assert guard._detect_reasoning_effort({"thinking": {"type": "enabled", "budget_tokens": 1024}}) == "low"
+    assert guard._detect_reasoning_effort({"thinking": {"type": "enabled", "budget_tokens": 2048}}) == "low"
+    # 2048 < budget_tokens <= 10000 -> "medium"
+    assert guard._detect_reasoning_effort({"thinking": {"type": "enabled", "budget_tokens": 2049}}) == "medium"
+    assert guard._detect_reasoning_effort({"thinking": {"type": "enabled", "budget_tokens": 5000}}) == "medium"
+    assert guard._detect_reasoning_effort({"thinking": {"type": "enabled", "budget_tokens": 10000}}) == "medium"
+    # budget_tokens > 10000 or type == "adaptive" -> "high"
+    assert guard._detect_reasoning_effort({"thinking": {"type": "enabled", "budget_tokens": 10001}}) == "high"
+    assert guard._detect_reasoning_effort({"thinking": {"type": "enabled", "budget_tokens": 16000}}) == "high"
+    assert guard._detect_reasoning_effort({"thinking": {"type": "adaptive"}}) == "high"
+    # disabled / absent -> "default"
+    assert guard._detect_reasoning_effort({"thinking": {"type": "disabled"}}) == "default"
+    assert guard._detect_reasoning_effort({"thinking": None}) == "default"
+    assert guard._detect_reasoning_effort({}) == "default"
+    assert guard._detect_reasoning_effort(None) == "default"
+
+
+@pytest.mark.asyncio
+async def test_detect_reasoning_effort_openai():
+    guard = StripOrphanToolChoiceGuard()
+    # reasoning_effort: "low"/"minimal" -> "low"
+    assert guard._detect_reasoning_effort({"reasoning_effort": "low"}) == "low"
+    assert guard._detect_reasoning_effort({"reasoning_effort": "minimal"}) == "low"
+    # "medium" -> "medium"
+    assert guard._detect_reasoning_effort({"reasoning_effort": "medium"}) == "medium"
+    # "high"/"xhigh"/"max" -> "high"
+    assert guard._detect_reasoning_effort({"reasoning_effort": "high"}) == "high"
+    assert guard._detect_reasoning_effort({"reasoning_effort": "xhigh"}) == "high"
+    assert guard._detect_reasoning_effort({"reasoning_effort": "max"}) == "high"
+    # reasoning: {"effort": "low"} -> "low"
+    assert guard._detect_reasoning_effort({"reasoning": {"effort": "low"}}) == "low"
+    assert guard._detect_reasoning_effort({"reasoning": {"effort": "minimal"}}) == "low"
+    assert guard._detect_reasoning_effort({"reasoning": {"effort": "medium"}}) == "medium"
+    assert guard._detect_reasoning_effort({"reasoning": {"effort": "high"}}) == "high"
+    assert guard._detect_reasoning_effort({"reasoning": {"effort": "xhigh"}}) == "high"
+    assert guard._detect_reasoning_effort({"reasoning": {"effort": "max"}}) == "high"
+
+
+@pytest.mark.asyncio
+async def test_resolve_antigravity_target():
+    guard = StripOrphanToolChoiceGuard()
+    # claude-haiku-* with default/low -> "antigravity-flash-low"
+    assert guard._resolve_antigravity_target("claude-haiku-4-5-20251001", "default") == "antigravity-flash-low"
+    assert guard._resolve_antigravity_target("claude-haiku-4-5", "low") == "antigravity-flash-low"
+    # claude-haiku-* with high -> "antigravity-flash-high"
+    assert guard._resolve_antigravity_target("claude-haiku-4-5-20251001", "high") == "antigravity-flash-high"
+    assert guard._resolve_antigravity_target("claude-haiku-4-5", "medium") == "antigravity-flash-medium"
+
+    # claude-gpt-5, claude-sonnet-*, gpt-5.4, gpt-* with default/high -> "antigravity-flash-high"
+    assert guard._resolve_antigravity_target("claude-gpt-5", "default") == "antigravity-flash-high"
+    assert guard._resolve_antigravity_target("claude-gpt-5", "high") == "antigravity-flash-high"
+    assert guard._resolve_antigravity_target("claude-sonnet-5", "default") == "antigravity-flash-high"
+    assert guard._resolve_antigravity_target("claude-sonnet-4-6", "high") == "antigravity-flash-high"
+    assert guard._resolve_antigravity_target("gpt-5.4", "default") == "antigravity-flash-high"
+    assert guard._resolve_antigravity_target("gpt-5.4", "high") == "antigravity-flash-high"
+    assert guard._resolve_antigravity_target("gpt-4o", "default") == "antigravity-flash-high"
+    assert guard._resolve_antigravity_target("gpt-5", "high") == "antigravity-flash-high"
+
+    # with low -> "antigravity-flash-low"
+    assert guard._resolve_antigravity_target("claude-gpt-5", "low") == "antigravity-flash-low"
+    assert guard._resolve_antigravity_target("claude-sonnet-5", "low") == "antigravity-flash-low"
+    assert guard._resolve_antigravity_target("gpt-5.4", "low") == "antigravity-flash-low"
+    assert guard._resolve_antigravity_target("gpt-4o", "low") == "antigravity-flash-low"
+
+    # with medium -> "antigravity-flash-medium"
+    assert guard._resolve_antigravity_target("claude-gpt-5", "medium") == "antigravity-flash-medium"
+    assert guard._resolve_antigravity_target("claude-sonnet-4-6", "medium") == "antigravity-flash-medium"
+    assert guard._resolve_antigravity_target("gpt-5.4", "medium") == "antigravity-flash-medium"
+    assert guard._resolve_antigravity_target("gpt-4o", "medium") == "antigravity-flash-medium"
+
+    # claude-opus-* and claude-mythos-* with any effort -> "antigravity-opus-4.6"
+    assert guard._resolve_antigravity_target("claude-opus-4-6", "default") == "antigravity-opus-4.6"
+    assert guard._resolve_antigravity_target("claude-opus-4-6", "low") == "antigravity-opus-4.6"
+    assert guard._resolve_antigravity_target("claude-opus-4-6", "medium") == "antigravity-opus-4.6"
+    assert guard._resolve_antigravity_target("claude-opus-4-6", "high") == "antigravity-opus-4.6"
+    assert guard._resolve_antigravity_target("claude-mythos-5", "default") == "antigravity-opus-4.6"
+    assert guard._resolve_antigravity_target("claude-mythos-5", "high") == "antigravity-opus-4.6"
+    assert guard._resolve_antigravity_target("claude-mythos-5", "low") == "antigravity-opus-4.6"
+
+
+@pytest.mark.asyncio
+async def test_async_pre_call_hook_rewrites_model_and_injects_reasoning_effort():
+    guard = StripOrphanToolChoiceGuard()
+    # Claude route with thinking low
+    payload_claude = {
+        "model": "claude-gpt-5",
+        "thinking": {"type": "enabled", "budget_tokens": 1024},
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    res_claude = await guard.async_pre_call_hook(
+        user_api_key_dict={}, cache=None, data=payload_claude, call_type="anthropic_messages"
+    )
+    assert res_claude["model"] == "antigravity-flash-low"
+    assert res_claude["reasoning_effort"] == "low"
+
+    # Claude route with default (no thinking) -> antigravity-flash-high
+    payload_default = {
+        "model": "claude-sonnet-5",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    res_default = await guard.async_pre_call_hook(
+        user_api_key_dict={}, cache=None, data=payload_default, call_type="anthropic_messages"
+    )
+    assert res_default["model"] == "antigravity-flash-high"
+    assert res_default["reasoning_effort"] == "high"
+
+    # Haiku with default -> antigravity-flash-low
+    payload_haiku = {
+        "model": "claude-haiku-4-5-20251001",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    res_haiku = await guard.async_pre_call_hook(
+        user_api_key_dict={}, cache=None, data=payload_haiku, call_type="anthropic_messages"
+    )
+    assert res_haiku["model"] == "antigravity-flash-low"
+    assert res_haiku["reasoning_effort"] == "low"
+
+    # Opus with medium effort -> antigravity-opus-4.6
+    payload_opus = {
+        "model": "claude-opus-4-6",
+        "thinking": {"type": "enabled", "budget_tokens": 5000},
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    res_opus = await guard.async_pre_call_hook(
+        user_api_key_dict={}, cache=None, data=payload_opus, call_type="anthropic_messages"
+    )
+    assert res_opus["model"] == "antigravity-opus-4.6"
+    assert res_opus["reasoning_effort"] == "medium"
+
+    # OpenAI / Codex route with reasoning_effort
+    payload_codex = {
+        "model": "gpt-5.4",
+        "reasoning_effort": "low",
+        "input": [{"type": "message", "role": "user", "content": "hello"}],
+    }
+    res_codex = await guard.async_pre_call_hook(
+        user_api_key_dict={}, cache=None, data=payload_codex, call_type="aresponses"
+    )
+    assert res_codex["model"] == "antigravity-flash-low"
+    assert res_codex["reasoning_effort"] == "low"
+
+    # Preserves sanitization: call_type stripped, stop_sequences stripped in Responses API
+    payload_sanitized = {
+        "model": "gpt-5.4",
+        "call_type": "aresponses",
+        "stop_sequences": ["\n\nHuman:"],
+        "input": [
+            {"type": "message", "role": "user", "content": "hello"},
+            {"type": "function_call_output", "call_id": "orphaned_1", "output": "bad"},
+        ],
+    }
+    res_sanitized = await guard.async_pre_call_hook(
+        user_api_key_dict={}, cache=None, data=payload_sanitized, call_type="aresponses"
+    )
+    assert res_sanitized["model"] == "antigravity-flash-high"
+    assert res_sanitized["reasoning_effort"] == "high"
+    assert "call_type" not in res_sanitized
+    assert "stop_sequences" not in res_sanitized
+    assert len(res_sanitized["input"]) == 1
+
+

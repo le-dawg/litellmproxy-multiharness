@@ -133,6 +133,64 @@ class StripOrphanToolChoiceGuard(CustomLogger):
         return sanitized
 
     # ------------------------------------------------------------------ #
+    #  Antigravity dynamic routing & reasoning effort translation
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _detect_reasoning_effort(data: Optional[dict]) -> str:
+        if not isinstance(data, dict):
+            return "default"
+
+        thinking = data.get("thinking")
+        if isinstance(thinking, dict):
+            t_type = thinking.get("type")
+            if t_type == "adaptive":
+                return "high"
+            elif t_type == "disabled":
+                return "default"
+            elif t_type == "enabled" or "budget_tokens" in thinking:
+                budget = thinking.get("budget_tokens")
+                if budget is not None:
+                    try:
+                        budget_int = int(budget)
+                        if budget_int <= 2048:
+                            return "low"
+                        elif budget_int <= 10000:
+                            return "medium"
+                        else:
+                            return "high"
+                    except (ValueError, TypeError):
+                        pass
+
+        effort = data.get("reasoning_effort")
+        reasoning_dict = data.get("reasoning")
+        if isinstance(reasoning_dict, dict):
+            effort = effort or reasoning_dict.get("effort")
+        if isinstance(effort, str):
+            effort = effort.lower().strip()
+            if effort in ("low", "minimal"):
+                return "low"
+            elif effort == "medium":
+                return "medium"
+            elif effort in ("high", "xhigh", "max"):
+                return "high"
+
+        return "default"
+
+    @staticmethod
+    def _resolve_antigravity_target(requested_model: str, effort: str) -> str:
+        raw = (requested_model or "").lower().strip()
+        clean = raw.split("/")[-1]
+        if "opus" in clean or "mythos" in clean:
+            return "antigravity-opus-4.6"
+        if "haiku" in clean:
+            resolved_effort = "low" if effort == "default" else effort
+            return f"antigravity-flash-{resolved_effort}"
+        # Default family: Sonnet, claude-gpt-5, gpt-5.4, gpt-*, wildcard
+        resolved_effort = "high" if effort == "default" else effort
+        return f"antigravity-flash-{resolved_effort}"
+
+    # ------------------------------------------------------------------ #
     #  main hook
     # ------------------------------------------------------------------ #
 
@@ -145,6 +203,39 @@ class StripOrphanToolChoiceGuard(CustomLogger):
     ) -> Optional[dict]:
         if not isinstance(data, dict):
             return data
+
+        # --- Dynamic Antigravity Model & Reasoning Effort Resolution ---
+        current_model = data.get("model", "")
+        if isinstance(current_model, str):
+            clean_check = current_model.lower().strip()
+            if (
+                any(clean_check.startswith(prefix) for prefix in ("claude-", "gpt-", "azure/"))
+                or clean_check in ("*", "claude-gpt-5")
+            ):
+                effort = self._detect_reasoning_effort(data)
+                target_model = self._resolve_antigravity_target(current_model, effort)
+                data["model"] = target_model
+                resolved_effort = (
+                    "low"
+                    if "low" in target_model
+                    else (
+                        "medium"
+                        if "medium" in target_model
+                        else (
+                            "high"
+                            if "high" in target_model
+                            else ("high" if effort == "default" else effort)
+                        )
+                    )
+                )
+                data["reasoning_effort"] = resolved_effort
+                verbose_proxy_logger.info(
+                    "StripOrphanToolChoiceGuard: routed %s (effort=%s) -> %s (reasoning_effort=%s)",
+                    current_model,
+                    effort,
+                    target_model,
+                    resolved_effort,
+                )
 
         # --- Universal parameter sanitizers for Azure OpenAI ---
         # Azure OpenAI rejects 'call_type' and 'route_type' with HTTP 400
