@@ -161,8 +161,6 @@ class AntigravityCircuitBreaker:
 
     @staticmethod
     def _to_base_model(model: str) -> str:
-        if model.startswith("antigravity-remote-"):
-            return "antigravity-" + model[len("antigravity-remote-"):]
         return model
 
     def get_target_for_model(self, model: str) -> str:
@@ -410,7 +408,7 @@ class StripOrphanToolChoiceGuard(CustomLogger):
                     resolved_effort,
                     self.circuit_breaker.state,
                 )
-            elif clean_check.startswith("antigravity-"):
+            elif clean_check.startswith("antigravity-") and not clean_check.startswith("antigravity-remote-"):
                 data["model"] = self.circuit_breaker.get_target_for_model(current_model)
 
         # --- Universal parameter sanitizers for Azure OpenAI ---

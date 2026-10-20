@@ -564,6 +564,21 @@ async def test_guard_integration_pre_call_hook_routes_to_remote_in_failover():
 
 
 @pytest.mark.asyncio
+async def test_guard_integration_pre_call_hook_preserves_direct_remote_requests():
+    guard = StripOrphanToolChoiceGuard()
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
+    payload_remote = {
+        "model": "antigravity-remote-flash-high",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    res_remote = await guard.async_pre_call_hook(
+        user_api_key_dict={}, cache=None, data=payload_remote, call_type="anthropic_messages"
+    )
+    assert res_remote["model"] == "antigravity-remote-flash-high"
+
+
+@pytest.mark.asyncio
 async def test_guard_integration_post_call_failure_triggers_circuit_breaker():
     guard = StripOrphanToolChoiceGuard()
     assert guard.circuit_breaker.state == STATE_PRIMARY
