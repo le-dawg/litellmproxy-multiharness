@@ -8,7 +8,14 @@ repo_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path.home() / ".litellm"))
 sys.path.insert(0, str(repo_root))
 
-from tool_choice_guard import StripOrphanToolChoiceGuard
+from tool_choice_guard import (
+    AntigravityCircuitBreaker,
+    StripOrphanToolChoiceGuard,
+    is_exhaustion_error,
+    STATE_PRIMARY,
+    STATE_FAILOVER,
+    STATE_PROBING,
+)
 
 
 @pytest.mark.asyncio
@@ -353,5 +360,249 @@ async def test_async_pre_call_hook_rewrites_model_and_injects_reasoning_effort()
     assert "call_type" not in res_sanitized
     assert "stop_sequences" not in res_sanitized
     assert len(res_sanitized["input"]) == 1
+
+
+# ----------------------------------------------------------------------
+# AntigravityCircuitBreaker & is_exhaustion_error Unit Tests
+# ----------------------------------------------------------------------
+
+
+def test_is_exhaustion_error_detects_429():
+    class DummyHTTPError(Exception):
+        def __init__(self, msg: str, status_code: int):
+            super().__init__(msg)
+            self.status_code = status_code
+
+    assert is_exhaustion_error(DummyHTTPError("Too Many Requests", 429)) is True
+    assert is_exhaustion_error(Exception("HTTP 429 Too Many Requests")) is True
+    assert is_exhaustion_error("Client error: 429 Too Many Requests") is True
+    assert is_exhaustion_error("status_code: 429") is True
+    assert is_exhaustion_error({"error_code": 429, "message": "rate limit"}) is True
+    assert is_exhaustion_error({"status_code": 429}) is True
+    assert is_exhaustion_error({"code": 429}) is True
+    assert is_exhaustion_error({"error": {"code": 429, "message": "Too many requests"}}) is True
+    assert is_exhaustion_error('{"error_code": 429, "message": "rate limit"}') is True
+
+
+def test_is_exhaustion_error_detects_resource_exhausted():
+    assert is_exhaustion_error(Exception("RESOURCE_EXHAUSTED")) is True
+    assert is_exhaustion_error(Exception("Error: resource_exhausted from backend")) is True
+    assert is_exhaustion_error("Resource_Exhausted: Quota exceeded") is True
+    assert is_exhaustion_error({"status": "RESOURCE_EXHAUSTED"}) is True
+    assert is_exhaustion_error({"status": "resource_exhausted"}) is True
+    assert is_exhaustion_error({"error": {"status": "RESOURCE_EXHAUSTED"}}) is True
+    assert is_exhaustion_error('{"status": "RESOURCE_EXHAUSTED"}') is True
+
+
+def test_is_exhaustion_error_detects_ai_credits_balance():
+    msg = "Your AI credits balance is too low to continue"
+    assert is_exhaustion_error(Exception(msg)) is True
+    assert is_exhaustion_error(Exception(f"Error 400: {msg}. Please upgrade.")) is True
+    assert is_exhaustion_error("your ai credits balance is too low to continue") is True
+    assert is_exhaustion_error({"message": msg}) is True
+
+
+def test_is_exhaustion_error_detects_resource_has_been_exhausted():
+    msg = "Resource has been exhausted (e.g. check quota)"
+    assert is_exhaustion_error(Exception(msg)) is True
+    assert is_exhaustion_error("Resource has been exhausted (e.g. check quota)") is True
+    assert is_exhaustion_error("Resource has been exhausted") is True
+    assert is_exhaustion_error({"error": {"message": msg}}) is True
+
+
+def test_is_exhaustion_error_rejects_unrelated_errors():
+    assert is_exhaustion_error(Exception("404 Not Found")) is False
+    assert is_exhaustion_error(Exception("500 Internal Server Error")) is False
+    assert is_exhaustion_error(SyntaxError("invalid syntax on line 42")) is False
+    assert is_exhaustion_error(SyntaxError("invalid syntax line 429")) is False
+    assert is_exhaustion_error(ValueError("bad value")) is False
+    assert is_exhaustion_error({"status_code": 404, "message": "Not Found"}) is False
+    assert is_exhaustion_error({"status_code": 500, "message": "Internal Server Error"}) is False
+    assert is_exhaustion_error({"status": "SUCCESS"}) is False
+    assert is_exhaustion_error(None) is False
+    assert is_exhaustion_error("") is False
+
+
+def test_circuit_breaker_default_state():
+    cb = AntigravityCircuitBreaker()
+    assert cb.state == STATE_PRIMARY
+    assert cb.state == "primary"
+    assert cb.get_target_for_model("antigravity-flash-high") == "antigravity-flash-high"
+
+
+def test_circuit_breaker_failover_model_mapping():
+    cb = AntigravityCircuitBreaker()
+    cb.trigger_failover()
+    assert cb.state == STATE_FAILOVER
+    assert cb.state == "failover"
+    assert cb.get_target_for_model("antigravity-flash-high") == "antigravity-remote-flash-high"
+    assert cb.get_target_for_model("antigravity-flash-low") == "antigravity-remote-flash-low"
+    assert cb.get_target_for_model("antigravity-flash-medium") == "antigravity-remote-flash-medium"
+    assert cb.get_target_for_model("antigravity-opus-4.6") == "antigravity-remote-opus-4.6"
+    # Remote model stays remote
+    assert cb.get_target_for_model("antigravity-remote-flash-high") == "antigravity-remote-flash-high"
+    # Unrelated model stays as is
+    assert cb.get_target_for_model("glm5.2") == "glm5.2"
+
+
+def test_circuit_breaker_cooldown_and_probing_transition():
+    current_time = 1000.0
+    cb = AntigravityCircuitBreaker(cooldown_seconds=900.0, time_fn=lambda: current_time)
+
+    # Initial state
+    assert cb.state == STATE_PRIMARY
+
+    # Trigger failover
+    cb.record_failure(Exception("HTTP 429 Too Many Requests"))
+    assert cb.state == STATE_FAILOVER
+
+    # When elapsed time < 900s, stays in STATE_FAILOVER
+    current_time = 1000.0 + 899.0
+    assert cb.state == STATE_FAILOVER
+    assert cb.get_target_for_model("antigravity-flash-high") == "antigravity-remote-flash-high"
+
+    # When elapsed time >= 900s, transitions to STATE_PROBING and returns base target
+    current_time = 1000.0 + 900.0
+    assert cb.state == STATE_PROBING
+    assert cb.get_target_for_model("antigravity-flash-high") == "antigravity-flash-high"
+
+
+def test_circuit_breaker_probe_success_transitions_to_primary():
+    current_time = 1000.0
+    cb = AntigravityCircuitBreaker(cooldown_seconds=900.0, time_fn=lambda: current_time)
+    cb.trigger_failover()
+    assert cb.state == STATE_FAILOVER
+
+    # Fast forward past cooldown to probing
+    current_time += 900.0
+    assert cb.state == STATE_PROBING
+
+    # Successful probe transitions back to primary
+    cb.record_success()
+    assert cb.state == STATE_PRIMARY
+    assert cb.get_target_for_model("antigravity-flash-high") == "antigravity-flash-high"
+
+
+def test_circuit_breaker_probe_failure_resets_cooldown_and_returns_to_failover():
+    current_time = 1000.0
+    cb = AntigravityCircuitBreaker(cooldown_seconds=900.0, time_fn=lambda: current_time)
+    cb.trigger_failover()
+
+    # Fast forward past cooldown
+    current_time += 900.0
+    assert cb.state == STATE_PROBING
+
+    # Failed probe with exhaustion error
+    cb.record_failure(Exception("RESOURCE_EXHAUSTED"))
+    assert cb.state == STATE_FAILOVER
+
+    # Cooldown timer was reset to 1900.0; at 1900 + 899 = 2799, still failover
+    current_time += 899.0
+    assert cb.state == STATE_FAILOVER
+    assert cb.get_target_for_model("antigravity-flash-high") == "antigravity-remote-flash-high"
+
+    # At 2800.0, transitions back to probing
+    current_time += 1.0
+    assert cb.state == STATE_PROBING
+    assert cb.get_target_for_model("antigravity-flash-high") == "antigravity-flash-high"
+
+
+def test_circuit_breaker_subsequent_failure_in_failover_resets_cooldown():
+    current_time = 1000.0
+    cb = AntigravityCircuitBreaker(cooldown_seconds=900.0, time_fn=lambda: current_time)
+    cb.trigger_failover()
+    assert cb.state == STATE_FAILOVER
+
+    # 500s later, another failure arrives while still in failover
+    current_time += 500.0
+    cb.record_failure(Exception("Your AI credits balance is too low to continue"))
+
+    # Cooldown reset to 1500.0; at 1500 + 899 = 2399, still failover
+    current_time += 899.0
+    assert cb.state == STATE_FAILOVER
+
+    # At 1500 + 900 = 2400, transitions to probing
+    current_time += 1.0
+    assert cb.state == STATE_PROBING
+
+
+def test_circuit_breaker_ignores_non_exhaustion_errors():
+    cb = AntigravityCircuitBreaker()
+    cb.record_failure(Exception("404 Not Found"))
+    assert cb.state == STATE_PRIMARY
+
+    cb.record_failure(Exception("500 Internal Server Error"))
+    assert cb.state == STATE_PRIMARY
+
+
+@pytest.mark.asyncio
+async def test_guard_integration_pre_call_hook_routes_to_remote_in_failover():
+    guard = StripOrphanToolChoiceGuard()
+    guard.circuit_breaker.trigger_failover()
+    assert guard.circuit_breaker.state == STATE_FAILOVER
+
+    # Claude request that resolves to flash-high should now be routed to remote
+    payload_claude = {
+        "model": "claude-gpt-5",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    res_claude = await guard.async_pre_call_hook(
+        user_api_key_dict={}, cache=None, data=payload_claude, call_type="anthropic_messages"
+    )
+    assert res_claude["model"] == "antigravity-remote-flash-high"
+    assert res_claude["reasoning_effort"] == "high"
+
+    # Direct antigravity model should also be routed to remote
+    payload_direct = {
+        "model": "antigravity-opus-4.6",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    res_direct = await guard.async_pre_call_hook(
+        user_api_key_dict={}, cache=None, data=payload_direct, call_type="anthropic_messages"
+    )
+    assert res_direct["model"] == "antigravity-remote-opus-4.6"
+
+
+@pytest.mark.asyncio
+async def test_guard_integration_post_call_failure_triggers_circuit_breaker():
+    guard = StripOrphanToolChoiceGuard()
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
+    # Exhaustion error should trigger circuit breaker
+    await guard.async_post_call_failure_hook(
+        request_data={"model": "antigravity-flash-high"},
+        original_exception=Exception("Resource has been exhausted (e.g. check quota)"),
+        user_api_key_dict={},
+    )
+    assert guard.circuit_breaker.state == STATE_FAILOVER
+
+
+@pytest.mark.asyncio
+async def test_guard_integration_post_call_failure_ignores_unrelated_errors():
+    guard = StripOrphanToolChoiceGuard()
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
+    await guard.async_post_call_failure_hook(
+        request_data={"model": "antigravity-flash-high"},
+        original_exception=Exception("404 Not Found"),
+        user_api_key_dict={},
+    )
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
+
+@pytest.mark.asyncio
+async def test_guard_integration_post_call_success_hook_records_success():
+    guard = StripOrphanToolChoiceGuard()
+    guard.circuit_breaker.trigger_failover()
+    guard.circuit_breaker._state = STATE_PROBING
+    assert guard.circuit_breaker.state == STATE_PROBING
+
+    await guard.async_post_call_success_hook(
+        data={"model": "antigravity-flash-high"},
+        user_api_key_dict={},
+        response={"choices": []},
+    )
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
 
 
