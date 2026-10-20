@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from pathlib import Path
 from typing import Any, Callable, List, Optional, Set
 
 import litellm
@@ -116,22 +117,56 @@ class AntigravityCircuitBreaker:
         self,
         cooldown_seconds: float = 900.0,
         time_fn: Optional[Callable[[], float]] = None,
+        state_file: Optional[Path | str] = None,
     ) -> None:
         self.cooldown_seconds = float(cooldown_seconds)
         self._time_fn = time_fn if time_fn is not None else time.time
+        self.state_file: Optional[Path] = Path(state_file) if state_file is not None else None
         self._state = STATE_PRIMARY
         self._last_failure_time: Optional[float] = None
+        self._load_state()
+
+    def _load_state(self) -> None:
+        if not self.state_file:
+            return
+        try:
+            if self.state_file.exists():
+                data = json.loads(self.state_file.read_text(encoding="utf-8"))
+                self._state = data.get("state", STATE_PRIMARY)
+                self._last_failure_time = data.get("last_failure_time")
+        except Exception:
+            pass
+
+    def _save_state(self, reason: Optional[Any] = None) -> None:
+        if not self.state_file:
+            return
+        try:
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "state": self._state,
+                "last_failure_time": self._last_failure_time,
+                "reason": str(reason) if reason else None,
+                "updated_at": self._time_fn(),
+            }
+            tmp_path = self.state_file.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            tmp_path.replace(self.state_file)
+        except Exception:
+            pass
 
     @property
     def state(self) -> str:
+        self._load_state()
         if self._state == STATE_FAILOVER and self._last_failure_time is not None:
             if self._time_fn() - self._last_failure_time >= self.cooldown_seconds:
                 self._state = STATE_PROBING
+                self._save_state("cooldown_elapsed")
         return self._state
 
     def trigger_failover(self, error: Any = None) -> None:
         self._state = STATE_FAILOVER
         self._last_failure_time = self._time_fn()
+        self._save_state(error)
 
     def record_failure(self, error: Any = None) -> bool:
         if error is not None and not is_exhaustion_error(error):
@@ -139,17 +174,21 @@ class AntigravityCircuitBreaker:
 
         self._state = STATE_FAILOVER
         self._last_failure_time = self._time_fn()
+        self._save_state(error)
         return True
 
     def record_success(self, model: Optional[str] = None) -> bool:
         if self.state == STATE_PROBING:
             self._state = STATE_PRIMARY
+            self._last_failure_time = None
+            self._save_state("probe_success")
             return True
         return False
 
     def reset(self) -> None:
         self._state = STATE_PRIMARY
         self._last_failure_time = None
+        self._save_state("manual_reset")
 
     @staticmethod
     def _to_remote_model(model: str) -> str:
@@ -525,7 +564,8 @@ class StripOrphanToolChoiceGuard(CustomLogger):
         return response
 
 
-circuit_breaker = AntigravityCircuitBreaker()
+_default_state_file = Path.home() / ".litellm" / "failover_state.json"
+circuit_breaker = AntigravityCircuitBreaker(state_file=_default_state_file)
 proxy_guard = StripOrphanToolChoiceGuard(circuit_breaker=circuit_breaker)
 
 

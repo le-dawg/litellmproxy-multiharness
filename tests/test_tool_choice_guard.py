@@ -564,6 +564,26 @@ async def test_guard_integration_pre_call_hook_routes_to_remote_in_failover():
 
 
 @pytest.mark.asyncio
+async def test_circuit_breaker_state_file_persistence(tmp_path):
+    state_file = tmp_path / "failover_state.json"
+    cb1 = AntigravityCircuitBreaker(state_file=state_file)
+    assert cb1.state == STATE_PRIMARY
+
+    cb1.trigger_failover("test RESOURCE_EXHAUSTED 429")
+    assert cb1.state == STATE_FAILOVER
+    assert state_file.exists()
+
+    # Second instance should read persisted state
+    cb2 = AntigravityCircuitBreaker(state_file=state_file)
+    assert cb2.state == STATE_FAILOVER
+
+    # Reset in cb2 should persist to cb1
+    cb2.reset()
+    assert cb2.state == STATE_PRIMARY
+    assert cb1.state == STATE_PRIMARY
+
+
+@pytest.mark.asyncio
 async def test_guard_integration_pre_call_hook_preserves_direct_remote_requests():
     guard = StripOrphanToolChoiceGuard()
     assert guard.circuit_breaker.state == STATE_PRIMARY
