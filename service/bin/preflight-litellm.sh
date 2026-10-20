@@ -94,6 +94,44 @@ for alias in sorted(required_antigravity_models & models.keys()):
     if params.get("api_base") != "http://127.0.0.1:8788/v1":
         errors.append(f"{alias}: api_base must be http://127.0.0.1:8788/v1")
 
+required_remote_antigravity_models = {
+    "antigravity-remote-flash-low",
+    "antigravity-remote-flash-medium",
+    "antigravity-remote-flash-high",
+    "antigravity-remote-opus-4.6",
+}
+missing_remote = sorted(required_remote_antigravity_models - models.keys())
+if missing_remote:
+    errors.append("missing required remote antigravity model aliases: " + ", ".join(missing_remote))
+
+for alias in sorted(required_remote_antigravity_models & models.keys()):
+    params = models[alias]
+    if params.get("api_base") != "http://10.147.17.130:8788/v1":
+        errors.append(f"{alias}: api_base must be http://10.147.17.130:8788/v1")
+    if params.get("api_key") != "sk-antigravity-local":
+        errors.append(f"{alias}: api_key must be sk-antigravity-local")
+
+router_settings = config.get("router_settings") or {}
+fallbacks = router_settings.get("fallbacks") or []
+fallback_map = {}
+if isinstance(fallbacks, list):
+    for item in fallbacks:
+        if isinstance(item, dict):
+            fallback_map.update(item)
+
+expected_fallbacks = {
+    "antigravity-flash-low": "antigravity-remote-flash-low",
+    "antigravity-flash-medium": "antigravity-remote-flash-medium",
+    "antigravity-flash-high": "antigravity-remote-flash-high",
+    "antigravity-opus-4.6": "antigravity-remote-opus-4.6",
+}
+for primary, remote in expected_fallbacks.items():
+    targets = fallback_map.get(primary, [])
+    if isinstance(targets, str):
+        targets = [targets]
+    if remote not in targets:
+        errors.append(f"router_settings.fallbacks missing {primary} -> {remote}")
+
 if errors:
     for error in errors:
         print(f"litellm-preflight: {error}", file=sys.stderr)

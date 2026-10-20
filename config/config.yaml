@@ -14,6 +14,13 @@ router_settings:
   retry_after: 3
   allowed_fails_policy:
     RateLimitError: 5
+  fallbacks:
+    - antigravity-flash-low: ["antigravity-remote-flash-low"]
+    - antigravity-flash-medium: ["antigravity-remote-flash-medium"]
+    - antigravity-flash-high: ["antigravity-remote-flash-high"]
+    - antigravity-opus-4.6: ["antigravity-remote-opus-4.6"]
+    - antigravity-flash: ["antigravity-remote-flash-medium"]
+    - antigravity-pro: ["antigravity-remote-opus-4.6"]
 
 model_list:
   # ------------------------------------------------------------------ #
@@ -41,6 +48,33 @@ model_list:
     litellm_params:
       model: openai/claude-opus-4.6-thinking
       api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+
+  # ------------------------------------------------------------------ #
+  #  ANTIGRAVITY REMOTE FAILOVER DEPLOYMENTS (ZeroTier Mac Mini: 8788) #
+  # ------------------------------------------------------------------ #
+  - model_name: antigravity-remote-flash-low
+    litellm_params:
+      model: openai/gemini-3.8-flash-low
+      api_base: http://10.147.17.130:8788/v1
+      api_key: sk-antigravity-local
+
+  - model_name: antigravity-remote-flash-medium
+    litellm_params:
+      model: openai/gemini-3.8-flash-medium
+      api_base: http://10.147.17.130:8788/v1
+      api_key: sk-antigravity-local
+
+  - model_name: antigravity-remote-flash-high
+    litellm_params:
+      model: openai/gemini-3.8-flash-high
+      api_base: http://10.147.17.130:8788/v1
+      api_key: sk-antigravity-local
+
+  - model_name: antigravity-remote-opus-4.6
+    litellm_params:
+      model: openai/claude-opus-4.6-thinking
+      api_base: http://10.147.17.130:8788/v1
       api_key: sk-antigravity-local
 
   # Backward compatibility aliases
