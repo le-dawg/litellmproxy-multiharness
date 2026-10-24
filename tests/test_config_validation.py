@@ -8,6 +8,17 @@ def _verify_config_dict(config: dict):
         "expose_router_debug_in_errors must be false to prevent cosmetic fallback errors"
     )
     assert litellm_settings.get("drop_params") is True, "drop_params must remain true"
+    assert litellm_settings.get("request_timeout") == 20, "request_timeout must be 20 to prevent unbounded hangs"
+    assert litellm_settings.get("use_chat_completions_url_for_anthropic_messages") is True, (
+        "use_chat_completions_url_for_anthropic_messages must be True for clean Antigravity bridge adaptation"
+    )
+
+    model_list = config.get("model_list", [])
+    flash_entry = next((m for m in model_list if m.get("model_name") == "antigravity-flash"), None)
+    assert flash_entry is not None, "antigravity-flash model must be configured in model_list"
+    assert flash_entry.get("litellm_params", {}).get("use_chat_completions_api") is True, (
+        "antigravity-flash must have use_chat_completions_api set to True"
+    )
 
     router_settings = config.get("router_settings", {})
     assert router_settings.get("num_retries", 0) >= 3, "num_retries must be >= 3"
