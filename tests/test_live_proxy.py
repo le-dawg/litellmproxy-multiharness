@@ -61,7 +61,7 @@ def test_messages_endpoint_preserves_tool_choice():
             "max_tokens": 16,
             "messages": [{"role": "user", "content": "ping"}],
         },
-        timeout=15.0,
+        timeout=30.0,
     )
     assert resp.status_code == 200, f"/v1/messages failed: {resp.text}"
     result = resp.json()
