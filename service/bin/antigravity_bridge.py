@@ -74,7 +74,24 @@ def messages_to_prompt(messages):
     return "\n\n".join(parts)
 
 
-def discover_ls():
+_cached_ls_info = None
+_cached_ls_expiry = 0.0
+
+_cached_model_map = None
+_cached_model_map_expiry = 0.0
+
+
+def discover_ls(force_refresh=False):
+    global _cached_ls_info, _cached_ls_expiry
+    now = time.time()
+    if not force_refresh and _cached_ls_info and now < _cached_ls_expiry:
+        try:
+            port = int(_cached_ls_info["address"].split(":")[1])
+            if port_ready(port):
+                return _cached_ls_info
+        except Exception:
+            pass
+
     result = subprocess.run(["ps", "-ax", "-o", "pid=,command="], capture_output=True, text=True, check=False)
     for line in result.stdout.splitlines():
         if LS_PATH not in line:
@@ -91,11 +108,14 @@ def discover_ls():
         ports = discover_listen_ports(pid)
         for port in ports:
             if port_ready(port):
-                return {
+                info = {
                     "pid": pid,
                     "address": f"127.0.0.1:{port}",
                     "csrf_token": csrf_token,
                 }
+                _cached_ls_info = info
+                _cached_ls_expiry = now + 10.0
+                return info
     return None
 
 
@@ -129,7 +149,7 @@ def ensure_ls(timeout_seconds=30):
     subprocess.run(["open", "-a", APP_PATH], check=False)
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
-        info = discover_ls()
+        info = discover_ls(force_refresh=True)
         if info:
             return info
         time.sleep(1)
@@ -151,7 +171,12 @@ def rpc(method, payload):
         return json.loads(response.read().decode("utf-8"))
 
 
-def load_model_map():
+def load_model_map(force_refresh=False):
+    global _cached_model_map, _cached_model_map_expiry
+    now = time.time()
+    if not force_refresh and _cached_model_map and now < _cached_model_map_expiry:
+        return _cached_model_map
+
     catalog = rpc("GetCascadeModelConfigData", {})
     configs = catalog.get("clientModelConfigs") or []
     default_model = (((catalog.get("defaultOverrideModelConfig") or {}).get("modelOrAlias") or {}).get("model"))
@@ -172,11 +197,11 @@ def load_model_map():
             ))
         if not ranked:
             return None
-        ranked.sort(reverse=True)
+        ranked.sort(reverse=True, key=lambda x: x[:4])
         chosen = ranked[0][-1]
         return (((chosen.get("modelOrAlias") or {}).get("model")) or default_model)
 
-    flash_model = default_model or choose(lambda label, model_id, _cfg: "flash" in label or "flash" in model_id)
+    flash_model = choose(lambda label, model_id, _cfg: "flash" in label or "flash" in model_id) or default_model
     pro_model = choose(lambda label, model_id, _cfg: any(token in label or token in model_id for token in ["opus", "pro", "sonnet"])) or flash_model
     opus_model = choose(lambda label, model_id, _cfg: "opus" in label or "opus" in model_id) or pro_model
     sonnet_model = choose(lambda label, model_id, _cfg: "sonnet" in label or "sonnet" in model_id) or pro_model
@@ -201,6 +226,8 @@ def load_model_map():
             model_map[model_id] = target
             model_map[model_id.lower()] = target
 
+    _cached_model_map = model_map
+    _cached_model_map_expiry = now + 30.0
     return model_map
 
 

@@ -640,4 +640,73 @@ async def test_guard_integration_post_call_success_hook_records_success():
     assert guard.circuit_breaker.state == STATE_PRIMARY
 
 
+def test_is_exhaustion_error_rejects_prompt_or_benign_429_numbers():
+    assert is_exhaustion_error(Exception("Connection failed to 127.0.0.1:4290")) is False
+    assert is_exhaustion_error(Exception("Processed 429 tokens in 1.2s")) is False
+    assert is_exhaustion_error(Exception("SyntaxError on line 429")) is False
+    assert is_exhaustion_error({"prompt": "Can you explain HTTP status code 429?"}) is False
+    assert is_exhaustion_error({"content": "Explain resource_exhausted in gRPC"}) is False
+
+
+@pytest.mark.asyncio
+async def test_async_post_call_failure_hook_ignores_none_exception_with_prompt_in_request_data():
+    guard = StripOrphanToolChoiceGuard()
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
+    # Prompt containing 429 and resource_exhausted in request_data should NOT trip breaker when original_exception is None
+    await guard.async_post_call_failure_hook(
+        request_data={
+            "model": "antigravity-flash-high",
+            "messages": [{"role": "user", "content": "How does HTTP 429 rate limit or resource_exhausted work?"}],
+        },
+        original_exception=None,
+        user_api_key_dict={},
+    )
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
+
+@pytest.mark.asyncio
+async def test_async_post_call_failure_hook_ignores_remote_model_failures():
+    guard = StripOrphanToolChoiceGuard()
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
+    # Failure on remote model should not trip local circuit breaker
+    await guard.async_post_call_failure_hook(
+        request_data={"model": "antigravity-remote-flash-high"},
+        original_exception=Exception("HTTP 429 Too Many Requests"),
+        user_api_key_dict={},
+    )
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
+
+def test_circuit_breaker_record_success_ignores_remote_model():
+    cb = AntigravityCircuitBreaker()
+    cb.trigger_failover()
+    cb._state = STATE_PROBING
+    assert cb.state == STATE_PROBING
+
+    # Success on remote model should NOT close probing
+    res = cb.record_success(model="antigravity-remote-flash-high")
+    assert res is False
+    assert cb.state == STATE_PROBING
+
+    # Success on primary model SHOULD close probing
+    res = cb.record_success(model="antigravity-flash-high")
+    assert res is True
+    assert cb.state == STATE_PRIMARY
+
+
+def test_ranked_tuple_sort_with_dict_does_not_raise_type_error():
+    # Verify that tuples with identical score and label sort by key=lambda x: x[:4] without comparing dicts
+    cfg1 = {"modelId": "m1", "modelOrAlias": {"model": "tgt1"}}
+    cfg2 = {"modelId": "m2", "modelOrAlias": {"model": "tgt2"}}
+    ranked = [
+        (1, 1, 0, "gemini", cfg1),
+        (1, 1, 0, "gemini", cfg2),
+    ]
+    ranked.sort(reverse=True, key=lambda x: x[:4])
+    assert ranked[0][-1] in (cfg1, cfg2)
+
+
+
 

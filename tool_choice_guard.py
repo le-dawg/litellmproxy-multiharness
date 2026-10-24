@@ -26,6 +26,9 @@ EXHAUSTION_PHRASES = (
     "resource_exhausted",
     "your ai credits balance is too low to continue",
     "resource has been exhausted",
+    "quota exceeded",
+    "exceeded your current quota",
+    "insufficient_quota",
 )
 
 
@@ -36,10 +39,10 @@ def is_exhaustion_error(error: Any) -> bool:
 
     # Check status code / code attributes on exception or object
     status_code = getattr(error, "status_code", None)
-    if status_code == 429:
+    if status_code in (429, "429"):
         return True
     http_status = getattr(error, "http_status", None)
-    if http_status == 429:
+    if http_status in (429, "429"):
         return True
     code = getattr(error, "code", None)
     if code in (429, "429"):
@@ -49,22 +52,22 @@ def is_exhaustion_error(error: Any) -> bool:
     if isinstance(error, (SyntaxError, IndentationError, TabError, NameError, TypeError, KeyError)):
         return False
 
-    # Check dict structure
+    # Check dict structure (only inspect error fields, never prompts or messages)
     if isinstance(error, dict):
-        if error.get("status_code") == 429 or error.get("error_code") == 429 or error.get("code") in (429, "429"):
+        if error.get("status_code") in (429, "429") or error.get("error_code") in (429, "429") or error.get("code") in (429, "429"):
             return True
         status_val = str(error.get("status", "")).strip().lower()
-        if status_val == "resource_exhausted":
+        if status_val in ("resource_exhausted", "429"):
             return True
         err_sub = error.get("error")
         if isinstance(err_sub, dict):
             if is_exhaustion_error(err_sub):
                 return True
-        dict_str = json.dumps(error).lower()
-        for phrase in EXHAUSTION_PHRASES:
-            if phrase in dict_str:
+        elif isinstance(err_sub, str):
+            if is_exhaustion_error(err_sub):
                 return True
-        if re.search(r"\b429\b", dict_str):
+        msg = error.get("message")
+        if isinstance(msg, str) and is_exhaustion_error(msg):
             return True
         return False
 
@@ -88,10 +91,13 @@ def is_exhaustion_error(error: Any) -> bool:
         if phrase in text_lower:
             return True
 
-    # Check 429 pattern, ensuring it is not "line 429"
-    if re.search(r"\b429\b", text_lower):
-        if not re.search(r"\bline\s+429\b", text_lower):
-            return True
+    # Check structured 429 status/error mentions (avoid bare 429 token counts, line numbers, port numbers)
+    if re.search(r"\b(?:status(?:_code)?|http|code|error|err|rate[_\s]limit)\s*[:=]?\s*429\b", text_lower):
+        return True
+    if re.search(r"\b429\s+(?:too many requests|rate limit|quota|exhausted)", text_lower):
+        return True
+    if "too many requests" in text_lower and ("rate" in text_lower or "limit" in text_lower or "429" in text_lower):
+        return True
 
     # Check args or response attributes if present
     args = getattr(error, "args", ())
@@ -178,6 +184,10 @@ class AntigravityCircuitBreaker:
         return True
 
     def record_success(self, model: Optional[str] = None) -> bool:
+        # Ignore success on remote fallback models so they don't prematurely close probing
+        if model and "antigravity-remote" in model:
+            return False
+
         if self.state == STATE_PROBING:
             self._state = STATE_PRIMARY
             self._last_failure_time = None
@@ -541,9 +551,19 @@ class StripOrphanToolChoiceGuard(CustomLogger):
         *args: Any,
         **kwargs: Any,
     ) -> Optional[Any]:
-        err = original_exception if original_exception is not None else request_data
-        if is_exhaustion_error(err):
-            self.circuit_breaker.record_failure(err)
+        if original_exception is None:
+            return None
+
+        # Ignore failures from remote fallback models
+        model = (request_data.get("model") or "") if isinstance(request_data, dict) else ""
+        if "antigravity-remote" in model:
+            verbose_proxy_logger.debug(
+                "StripOrphanToolChoiceGuard: Ignoring failure on remote model %s", model
+            )
+            return None
+
+        if is_exhaustion_error(original_exception):
+            self.circuit_breaker.record_failure(original_exception)
             verbose_proxy_logger.warning(
                 "StripOrphanToolChoiceGuard: Exhaustion error detected (%s). Circuit breaker switched to %s",
                 original_exception,
