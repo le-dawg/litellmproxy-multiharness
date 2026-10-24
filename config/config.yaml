@@ -29,6 +29,13 @@ router_settings:
   retry_after: 3
   allowed_fails_policy:
     RateLimitError: 5
+  fallbacks:
+    - antigravity-flash-low: ["antigravity-remote-flash-low"]
+    - antigravity-flash-medium: ["antigravity-remote-flash-medium"]
+    - antigravity-flash-high: ["antigravity-remote-flash-high"]
+    - antigravity-opus-4.6: ["antigravity-remote-opus-4.6"]
+    - antigravity-flash: ["antigravity-remote-flash-medium"]
+    - antigravity-pro: ["antigravity-remote-opus-4.6"]
   model_group_alias:
     "claude-sonnet-5": "antigravity-flash"
     "claude-sonnet-4-6": "antigravity-flash"
@@ -36,20 +43,9 @@ router_settings:
     "claude-gpt-5": "antigravity-flash"
 
 model_list:
-  - model_name: antigravity-flash
-    litellm_params:
-      model: openai/antigravity-flash
-      api_base: http://127.0.0.1:8788/v1
-      api_key: sk-antigravity-local
-      use_chat_completions_api: true
-
-  - model_name: antigravity-pro
-    litellm_params:
-      model: openai/antigravity-pro
-      api_base: http://127.0.0.1:8788/v1
-      api_key: sk-antigravity-local
-      use_chat_completions_api: true
-
+  # ------------------------------------------------------------------ #
+  #  ANTIGRAVITY ACTIVE DEPLOYMENTS (Port 8788)                        #
+  # ------------------------------------------------------------------ #
   - model_name: antigravity-flash-low
     litellm_params:
       model: openai/gemini-3.8-flash-low
@@ -67,6 +63,27 @@ model_list:
   - model_name: antigravity-flash-high
     litellm_params:
       model: openai/gemini-3.8-flash-high
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: antigravity-opus-4.6
+    litellm_params:
+      model: openai/claude-opus-4.6-thinking
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: antigravity-flash
+    litellm_params:
+      model: openai/antigravity-flash
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: antigravity-pro
+    litellm_params:
+      model: openai/antigravity-pro
       api_base: http://127.0.0.1:8788/v1
       api_key: sk-antigravity-local
       use_chat_completions_api: true
@@ -113,82 +130,134 @@ model_list:
       api_key: sk-antigravity-local
       use_chat_completions_api: true
 
+  # ------------------------------------------------------------------ #
+  #  ANTIGRAVITY REMOTE FAILOVER DEPLOYMENTS                           #
+  # ------------------------------------------------------------------ #
+  - model_name: antigravity-remote-flash-low
+    litellm_params:
+      model: openai/gemini-3.8-flash-low
+      api_base: http://10.147.17.130:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: antigravity-remote-flash-medium
+    litellm_params:
+      model: openai/gemini-3.8-flash-medium
+      api_base: http://10.147.17.130:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: antigravity-remote-flash-high
+    litellm_params:
+      model: openai/gemini-3.8-flash-high
+      api_base: http://10.147.17.130:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: antigravity-remote-opus-4.6
+    litellm_params:
+      model: openai/claude-opus-4.6-thinking
+      api_base: http://10.147.17.130:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  # ------------------------------------------------------------------ #
+  #  SAFETY NET DEFAULTS                                               #
+  # ------------------------------------------------------------------ #
   - model_name: claude-gpt-5
     litellm_params:
-      model: openai/antigravity-flash
+      model: openai/gemini-3.8-flash-high
       api_base: http://127.0.0.1:8788/v1
       api_key: sk-antigravity-local
       use_chat_completions_api: true
 
   - model_name: claude-sonnet-5
     litellm_params:
-      model: openai/antigravity-flash
+      model: openai/gemini-3.8-flash-high
       api_base: http://127.0.0.1:8788/v1
       api_key: sk-antigravity-local
       use_chat_completions_api: true
 
   - model_name: claude-sonnet-4-6
     litellm_params:
-      model: openai/antigravity-flash
+      model: openai/gemini-3.8-flash-high
       api_base: http://127.0.0.1:8788/v1
       api_key: sk-antigravity-local
       use_chat_completions_api: true
 
   - model_name: claude-sonnet-4-5
     litellm_params:
-      model: openai/antigravity-flash
+      model: openai/gemini-3.8-flash-high
       api_base: http://127.0.0.1:8788/v1
       api_key: sk-antigravity-local
       use_chat_completions_api: true
 
   - model_name: claude-haiku-4-5-20251001
     litellm_params:
-      model: openai/antigravity-flash
+      model: openai/gemini-3.8-flash-low
       api_base: http://127.0.0.1:8788/v1
       api_key: sk-antigravity-local
       use_chat_completions_api: true
 
   - model_name: "claude-*"
     litellm_params:
-      model: openai/antigravity-flash
+      model: openai/gemini-3.8-flash-high
       api_base: http://127.0.0.1:8788/v1
       api_key: sk-antigravity-local
       use_chat_completions_api: true
 
   - model_name: gpt-5.4
     litellm_params:
-      model: openai/antigravity-flash
-      api_base: http://127.0.0.1:8788/v1
-      api_key: sk-antigravity-local
-      use_chat_completions_api: true
-
-  - model_name: glm5.2
-    litellm_params:
-      model: openai/antigravity-flash
-      api_base: http://127.0.0.1:8788/v1
-      api_key: sk-antigravity-local
-      use_chat_completions_api: true
-
-  - model_name: qwen3.5-122b
-    litellm_params:
-      model: openai/antigravity-flash
+      model: openai/gemini-3.8-flash-high
       api_base: http://127.0.0.1:8788/v1
       api_key: sk-antigravity-local
       use_chat_completions_api: true
 
   - model_name: "gpt-*"
     litellm_params:
-      model: openai/antigravity-flash
+      model: openai/gemini-3.8-flash-high
       api_base: http://127.0.0.1:8788/v1
       api_key: sk-antigravity-local
       use_chat_completions_api: true
 
   - model_name: "*"
     litellm_params:
-      model: openai/antigravity-flash
+      model: openai/gemini-3.8-flash-high
       api_base: http://127.0.0.1:8788/v1
       api_key: sk-antigravity-local
       use_chat_completions_api: true
+
+  # External Provider Fallbacks
+  - model_name: glm5.2
+    litellm_params:
+      model: openai/glm5.2
+      api_base: https://api.regolo.ai/v1
+      api_key: os.environ/REGOLO_API_KEY
+
+  - model_name: qwen3.5-122b
+    litellm_params:
+      model: openai/qwen3.5-122b
+      api_base: https://api.regolo.ai/v1
+      api_key: os.environ/REGOLO_API_KEY
+
+  # ------------------------------------------------------------------ #
+  #  INACTIVE AZURE DEFINITIONS (Preserved for future revival/reference)#
+  # ------------------------------------------------------------------ #
+  - model_name: inactive-azure-gpt-5.4
+    litellm_params:
+      model: azure/gpt-5.4
+      api_base: https://regent-ai-dev.cognitiveservices.azure.com
+      api_version: "2025-04-01-preview"
+      api_key: os.environ/AZURE_OPENAI_API_KEY
+      base_model: gpt-5.4
+
+  - model_name: inactive-azure-claude-gpt-5
+    litellm_params:
+      model: azure/gpt-5.4
+      api_base: https://regent-ai-dev.cognitiveservices.azure.com
+      api_version: "2025-04-01-preview"
+      api_key: os.environ/AZURE_OPENAI_API_KEY
+      base_model: gpt-5.4
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

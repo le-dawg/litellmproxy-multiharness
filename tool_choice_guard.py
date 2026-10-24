@@ -1,9 +1,215 @@
 from __future__ import annotations
 
-from typing import Any, List, Optional, Set
+import json
+import re
+import time
+from pathlib import Path
+from typing import Any, Callable, List, Optional, Set
 
+import litellm
 from litellm._logging import verbose_proxy_logger
 from litellm.integrations.custom_logger import CustomLogger
+
+# Ensure Anthropic /v1/messages requests route through Chat Completions adapter
+litellm.use_chat_completions_url_for_anthropic_messages = True
+
+
+# ---------------------------------------------------------------------- #
+#  Antigravity Failover Circuit Breaker & Exhaustion Detection           #
+# ---------------------------------------------------------------------- #
+
+STATE_PRIMARY = "primary"
+STATE_FAILOVER = "failover"
+STATE_PROBING = "probing"
+
+EXHAUSTION_PHRASES = (
+    "resource_exhausted",
+    "your ai credits balance is too low to continue",
+    "resource has been exhausted",
+)
+
+
+def is_exhaustion_error(error: Any) -> bool:
+    """Return True if error matches known quota or credit exhaustion signatures."""
+    if error is None or error == "":
+        return False
+
+    # Check status code / code attributes on exception or object
+    status_code = getattr(error, "status_code", None)
+    if status_code == 429:
+        return True
+    http_status = getattr(error, "http_status", None)
+    if http_status == 429:
+        return True
+    code = getattr(error, "code", None)
+    if code in (429, "429"):
+        return True
+
+    # If it is a standard programming syntax/type exception without explicit 429 attribute, reject
+    if isinstance(error, (SyntaxError, IndentationError, TabError, NameError, TypeError, KeyError)):
+        return False
+
+    # Check dict structure
+    if isinstance(error, dict):
+        if error.get("status_code") == 429 or error.get("error_code") == 429 or error.get("code") in (429, "429"):
+            return True
+        status_val = str(error.get("status", "")).strip().lower()
+        if status_val == "resource_exhausted":
+            return True
+        err_sub = error.get("error")
+        if isinstance(err_sub, dict):
+            if is_exhaustion_error(err_sub):
+                return True
+        dict_str = json.dumps(error).lower()
+        for phrase in EXHAUSTION_PHRASES:
+            if phrase in dict_str:
+                return True
+        if re.search(r"\b429\b", dict_str):
+            return True
+        return False
+
+    # Check string representation
+    text = str(error)
+
+    # Check if string is serialized JSON
+    stripped = text.strip()
+    if (stripped.startswith("{") and stripped.endswith("}")) or (stripped.startswith("[") and stripped.endswith("]")):
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, dict) and is_exhaustion_error(parsed):
+                return True
+        except Exception:
+            pass
+
+    text_lower = text.lower()
+
+    # Check known exhaustion phrases
+    for phrase in EXHAUSTION_PHRASES:
+        if phrase in text_lower:
+            return True
+
+    # Check 429 pattern, ensuring it is not "line 429"
+    if re.search(r"\b429\b", text_lower):
+        if not re.search(r"\bline\s+429\b", text_lower):
+            return True
+
+    # Check args or response attributes if present
+    args = getattr(error, "args", ())
+    for arg in args:
+        if isinstance(arg, dict) and is_exhaustion_error(arg):
+            return True
+        elif isinstance(arg, str) and is_exhaustion_error(arg):
+            return True
+
+    return False
+
+
+class AntigravityCircuitBreaker:
+    """Circuit breaker for Antigravity upstream endpoints.
+
+    States:
+    - STATE_PRIMARY ("primary"): Standard routing to local/primary Antigravity endpoint.
+    - STATE_FAILOVER ("failover"): Upstream quota/credit exhaustion detected; reroute to remote fallback.
+    - STATE_PROBING ("probing"): Cooldown (default 15 mins / 900s) expired; probe primary with base target.
+    """
+
+    def __init__(
+        self,
+        cooldown_seconds: float = 900.0,
+        time_fn: Optional[Callable[[], float]] = None,
+        state_file: Optional[Path | str] = None,
+    ) -> None:
+        self.cooldown_seconds = float(cooldown_seconds)
+        self._time_fn = time_fn if time_fn is not None else time.time
+        self.state_file: Optional[Path] = Path(state_file) if state_file is not None else None
+        self._state = STATE_PRIMARY
+        self._last_failure_time: Optional[float] = None
+        self._load_state()
+
+    def _load_state(self) -> None:
+        if not self.state_file:
+            return
+        try:
+            if self.state_file.exists():
+                data = json.loads(self.state_file.read_text(encoding="utf-8"))
+                self._state = data.get("state", STATE_PRIMARY)
+                self._last_failure_time = data.get("last_failure_time")
+        except Exception:
+            pass
+
+    def _save_state(self, reason: Optional[Any] = None) -> None:
+        if not self.state_file:
+            return
+        try:
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "state": self._state,
+                "last_failure_time": self._last_failure_time,
+                "reason": str(reason) if reason else None,
+                "updated_at": self._time_fn(),
+            }
+            tmp_path = self.state_file.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            tmp_path.replace(self.state_file)
+        except Exception:
+            pass
+
+    @property
+    def state(self) -> str:
+        self._load_state()
+        if self._state == STATE_FAILOVER and self._last_failure_time is not None:
+            if self._time_fn() - self._last_failure_time >= self.cooldown_seconds:
+                self._state = STATE_PROBING
+                self._save_state("cooldown_elapsed")
+        return self._state
+
+    def trigger_failover(self, error: Any = None) -> None:
+        self._state = STATE_FAILOVER
+        self._last_failure_time = self._time_fn()
+        self._save_state(error)
+
+    def record_failure(self, error: Any = None) -> bool:
+        if error is not None and not is_exhaustion_error(error):
+            return False
+
+        self._state = STATE_FAILOVER
+        self._last_failure_time = self._time_fn()
+        self._save_state(error)
+        return True
+
+    def record_success(self, model: Optional[str] = None) -> bool:
+        if self.state == STATE_PROBING:
+            self._state = STATE_PRIMARY
+            self._last_failure_time = None
+            self._save_state("probe_success")
+            return True
+        return False
+
+    def reset(self) -> None:
+        self._state = STATE_PRIMARY
+        self._last_failure_time = None
+        self._save_state("manual_reset")
+
+    @staticmethod
+    def _to_remote_model(model: str) -> str:
+        if model.startswith("antigravity-remote-"):
+            return model
+        if model.startswith("antigravity-"):
+            return "antigravity-remote-" + model[len("antigravity-"):]
+        return model
+
+    @staticmethod
+    def _to_base_model(model: str) -> str:
+        return model
+
+    def get_target_for_model(self, model: str) -> str:
+        current_state = self.state
+        if current_state == STATE_FAILOVER:
+            return self._to_remote_model(model)
+        elif current_state == STATE_PROBING:
+            return self._to_base_model(model)
+        else:  # STATE_PRIMARY
+            return self._to_base_model(model)
 
 
 class StripOrphanToolChoiceGuard(CustomLogger):
@@ -17,6 +223,10 @@ class StripOrphanToolChoiceGuard(CustomLogger):
     requires call_id.") when Codex Desktop's auto-compact truncation
     removes earlier ``function_call`` turns while leaving their outputs.
     """
+
+    def __init__(self, circuit_breaker: Optional[AntigravityCircuitBreaker] = None):
+        super().__init__()
+        self.circuit_breaker = circuit_breaker or AntigravityCircuitBreaker()
 
     # ------------------------------------------------------------------ #
     #  tool_choice guard (existing)
@@ -133,6 +343,64 @@ class StripOrphanToolChoiceGuard(CustomLogger):
         return sanitized
 
     # ------------------------------------------------------------------ #
+    #  Antigravity dynamic routing & reasoning effort translation
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _detect_reasoning_effort(data: Optional[dict]) -> str:
+        if not isinstance(data, dict):
+            return "default"
+
+        thinking = data.get("thinking")
+        if isinstance(thinking, dict):
+            t_type = thinking.get("type")
+            if t_type == "adaptive":
+                return "high"
+            elif t_type == "disabled":
+                return "default"
+            elif t_type == "enabled" or "budget_tokens" in thinking:
+                budget = thinking.get("budget_tokens")
+                if budget is not None:
+                    try:
+                        budget_int = int(budget)
+                        if budget_int <= 2048:
+                            return "low"
+                        elif budget_int <= 10000:
+                            return "medium"
+                        else:
+                            return "high"
+                    except (ValueError, TypeError):
+                        pass
+
+        effort = data.get("reasoning_effort")
+        reasoning_dict = data.get("reasoning")
+        if isinstance(reasoning_dict, dict):
+            effort = effort or reasoning_dict.get("effort")
+        if isinstance(effort, str):
+            effort = effort.lower().strip()
+            if effort in ("low", "minimal"):
+                return "low"
+            elif effort == "medium":
+                return "medium"
+            elif effort in ("high", "xhigh", "max"):
+                return "high"
+
+        return "default"
+
+    @staticmethod
+    def _resolve_antigravity_target(requested_model: str, effort: str) -> str:
+        raw = (requested_model or "").lower().strip()
+        clean = raw.split("/")[-1]
+        if "opus" in clean or "mythos" in clean:
+            return "antigravity-opus-4.6"
+        if "haiku" in clean:
+            resolved_effort = "low" if effort == "default" else effort
+            return f"antigravity-flash-{resolved_effort}"
+        # Default family: Sonnet, claude-gpt-5, gpt-5.4, gpt-*, wildcard
+        resolved_effort = "high" if effort == "default" else effort
+        return f"antigravity-flash-{resolved_effort}"
+
+    # ------------------------------------------------------------------ #
     #  main hook
     # ------------------------------------------------------------------ #
 
@@ -145,6 +413,42 @@ class StripOrphanToolChoiceGuard(CustomLogger):
     ) -> Optional[dict]:
         if not isinstance(data, dict):
             return data
+
+        # --- Dynamic Antigravity Model & Reasoning Effort Resolution ---
+        current_model = data.get("model", "")
+        if isinstance(current_model, str):
+            clean_check = current_model.lower().strip()
+            if (
+                any(clean_check.startswith(prefix) for prefix in ("claude-", "gpt-", "azure/"))
+                or clean_check in ("*", "claude-gpt-5")
+            ):
+                effort = self._detect_reasoning_effort(data)
+                target_model = self._resolve_antigravity_target(current_model, effort)
+                resolved_effort = (
+                    "low"
+                    if "low" in target_model
+                    else (
+                        "medium"
+                        if "medium" in target_model
+                        else (
+                            "high"
+                            if "high" in target_model
+                            else ("high" if effort == "default" else effort)
+                        )
+                    )
+                )
+                data["reasoning_effort"] = resolved_effort
+                data["model"] = self.circuit_breaker.get_target_for_model(target_model)
+                verbose_proxy_logger.info(
+                    "StripOrphanToolChoiceGuard: routed %s (effort=%s) -> %s (reasoning_effort=%s, cb_state=%s)",
+                    current_model,
+                    effort,
+                    data["model"],
+                    resolved_effort,
+                    self.circuit_breaker.state,
+                )
+            elif clean_check.startswith("antigravity-") and not clean_check.startswith("antigravity-remote-"):
+                data["model"] = self.circuit_breaker.get_target_for_model(current_model)
 
         # --- Universal parameter sanitizers for Azure OpenAI ---
         # Azure OpenAI rejects 'call_type' and 'route_type' with HTTP 400
@@ -228,6 +532,40 @@ class StripOrphanToolChoiceGuard(CustomLogger):
 
         return kwargs
 
+    async def async_post_call_failure_hook(
+        self,
+        request_data: dict,
+        original_exception: Exception,
+        user_api_key_dict: Any,
+        traceback_str: Optional[str] = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Optional[Any]:
+        err = original_exception if original_exception is not None else request_data
+        if is_exhaustion_error(err):
+            self.circuit_breaker.record_failure(err)
+            verbose_proxy_logger.warning(
+                "StripOrphanToolChoiceGuard: Exhaustion error detected (%s). Circuit breaker switched to %s",
+                original_exception,
+                self.circuit_breaker.state,
+            )
+        return None
 
-proxy_guard = StripOrphanToolChoiceGuard()
+    async def async_post_call_success_hook(
+        self,
+        data: dict,
+        user_api_key_dict: Any,
+        response: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        model = data.get("model") if isinstance(data, dict) else None
+        self.circuit_breaker.record_success(model)
+        return response
+
+
+_default_state_file = Path.home() / ".litellm" / "failover_state.json"
+circuit_breaker = AntigravityCircuitBreaker(state_file=_default_state_file)
+proxy_guard = StripOrphanToolChoiceGuard(circuit_breaker=circuit_breaker)
+
 
