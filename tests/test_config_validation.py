@@ -20,6 +20,10 @@ def _verify_config_dict(config: dict):
         "antigravity-flash must have use_chat_completions_api set to True"
     )
 
+    flash_low_entry = next((m for m in model_list if m.get("model_name") == "gemini-3.8-flash-low"), None)
+    assert flash_low_entry is not None, "gemini-3.8-flash-low must be configured in model_list"
+    assert flash_low_entry.get("litellm_params", {}).get("use_chat_completions_api") is True
+
     router_settings = config.get("router_settings", {})
     assert router_settings.get("num_retries", 0) >= 3, "num_retries must be >= 3"
     assert router_settings.get("retry_after", 0) >= 3, "retry_after must be >= 3 seconds"

@@ -19,6 +19,10 @@ litellm_settings:
     gpt-5.6-terra: antigravity-flash
     gpt-6.1-sol: antigravity-flash
     glm-5.2: antigravity-flash
+    gemini-3.8-flash: gemini-3.8-flash-medium
+    gemini-flash: gemini-3.8-flash-medium
+    gemini-pro: antigravity-pro
+    gemini-argon: gemini-4-argon-medium
 
 router_settings:
   num_retries: 3
@@ -42,6 +46,69 @@ model_list:
   - model_name: antigravity-pro
     litellm_params:
       model: openai/antigravity-pro
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: antigravity-flash-low
+    litellm_params:
+      model: openai/gemini-3.8-flash-low
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: antigravity-flash-medium
+    litellm_params:
+      model: openai/gemini-3.8-flash-medium
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: antigravity-flash-high
+    litellm_params:
+      model: openai/gemini-3.8-flash-high
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: gemini-3.8-flash-low
+    litellm_params:
+      model: openai/gemini-3.8-flash-low
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: gemini-3.8-flash-medium
+    litellm_params:
+      model: openai/gemini-3.8-flash-medium
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: gemini-3.8-flash-high
+    litellm_params:
+      model: openai/gemini-3.8-flash-high
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: gemini-4-argon-low
+    litellm_params:
+      model: openai/gemini-4-argon-low
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: gemini-4-argon-medium
+    litellm_params:
+      model: openai/gemini-4-argon-medium
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: gemini-4-argon-high
+    litellm_params:
+      model: openai/gemini-4-argon-high
       api_base: http://127.0.0.1:8788/v1
       api_key: sk-antigravity-local
       use_chat_completions_api: true
