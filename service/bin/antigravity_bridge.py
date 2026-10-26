@@ -2,9 +2,11 @@
 import json
 import os
 import re
+import socket
 import subprocess
 import time
 import uuid
+from http import client as http_client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib import error, request
@@ -19,6 +21,13 @@ STATE_DIR = HOME / ".litellm"
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 TRAFFIC_LOG = STATE_DIR / "antigravity-traffic.jsonl"
 SERVICE_LOG = STATE_DIR / "antigravity-bridge.log"
+
+BUDDY_REGEX = re.compile(r"<!--\s*buddy:.*?-->", re.DOTALL | re.IGNORECASE)
+CAVEMAN_BLOCK_REGEX = re.compile(
+    r"(?:<system-reminder>\s*)?(?:UserPromptSubmit hook additional context:\s*)?CAVEMAN MODE ACTIVE.*?(?:</system-reminder>|(?=\n\n)|$)",
+    re.DOTALL | re.IGNORECASE,
+)
+TOOL_CALL_REGEX = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL | re.IGNORECASE)
 
 
 def log_service(message):
@@ -54,24 +63,434 @@ def flatten_content(value):
                     parts.append(str(text))
         return "\n".join(part for part in parts if part)
     if isinstance(value, dict):
-        return value.get("text") or value.get("content") or ""
+        return str(value.get("text") or value.get("content") or "")
     return str(value)
 
 
-def messages_to_prompt(messages):
-    if not isinstance(messages, list):
-        return flatten_content(messages)
-    if len(messages) == 1 and isinstance(messages[0], dict):
-        return flatten_content(messages[0].get("content"))
-    parts = []
-    for message in messages:
-        if not isinstance(message, dict):
+def format_tool_instructions(tools, tool_choice="auto"):
+    if not tools:
+        return ""
+    tool_lines = []
+    for tool in tools:
+        func = tool.get("function") or tool
+        name = func.get("name")
+        desc = func.get("description", "")
+        params = func.get("parameters", {})
+        tool_lines.append(
+            f"- Tool: `{name}`\n"
+            f"  Description: {desc}\n"
+            f"  Parameters Schema: {json.dumps(params, ensure_ascii=False)}"
+        )
+    tools_str = "\n".join(tool_lines)
+
+    instruction = (
+        "# Available Tools\n"
+        "You have access to the following tools:\n"
+        f"{tools_str}\n\n"
+        "# Tool Calling Instructions\n"
+        "To invoke a tool, output a tool call block using the exact demarcation tags:\n"
+        "<tool_call>\n"
+        "{\"name\": \"TOOL_NAME\", \"arguments\": { ... }}\n"
+        "</tool_call>\n\n"
+        "Rules:\n"
+        "1. The arguments must strictly conform to the parameter JSON schema.\n"
+        "2. Do NOT wrap <tool_call> in markdown code blocks like ```json or ```xml.\n"
+        "3. You may provide explanatory text before or after the tool call.\n"
+        "4. You may make multiple tool calls by outputting multiple consecutive <tool_call>...</tool_call> blocks.\n"
+        "5. If no tool call is needed, respond with normal conversational text."
+    )
+
+    if tool_choice == "required":
+        instruction += "\nCRITICAL: You MUST call at least one tool in this turn."
+    elif isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+        req_name = tool_choice.get("function", {}).get("name")
+        if req_name:
+            instruction += f"\nCRITICAL: You MUST invoke the `{req_name}` tool in this turn."
+    elif tool_choice == "none":
+        instruction += "\nCRITICAL: Do NOT call any tools in this turn. Respond with text only."
+
+    return instruction
+
+
+def extract_balanced_json(text: str, start_idx: int):
+    """Extract a balanced JSON { ... } or [ ... ] chunk starting at start_idx.
+    Properly handles quotes and escape characters.
+    Returns (matched_str, end_idx) or None if unbalanced.
+    """
+    if start_idx >= len(text):
+        return None
+    open_char = text[start_idx]
+    if open_char == "{":
+        close_char = "}"
+    elif open_char == "[":
+        close_char = "]"
+    else:
+        return None
+
+    depth = 0
+    in_quote = None
+    escape = False
+
+    for i in range(start_idx, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
             continue
-        role = (message.get("role") or "user").upper()
-        content = flatten_content(message.get("content"))
+        if ch == "\\":
+            escape = True
+            continue
+        if in_quote:
+            if ch == in_quote:
+                in_quote = None
+            continue
+        else:
+            if ch in ('"', "'"):
+                in_quote = ch
+            elif ch == open_char:
+                depth += 1
+            elif ch == close_char:
+                depth -= 1
+                if depth == 0:
+                    return text[start_idx : i + 1], i + 1
+    return None
+
+
+def _extract_single_call(item):
+    if not isinstance(item, dict):
+        return None
+    name = item.get("name")
+    if not name and isinstance(item.get("function"), dict):
+        name = item["function"].get("name")
+        args = item["function"].get("arguments", {})
+    else:
+        args = item.get("arguments", item.get("parameters", {}))
+
+    if not name or not isinstance(name, str):
+        return None
+
+    if isinstance(args, (dict, list)):
+        args_str = json.dumps(args, ensure_ascii=False)
+    elif isinstance(args, str):
+        args_str = args
+    else:
+        args_str = "{}"
+
+    call_id = f"call_{uuid.uuid4().hex[:24]}"
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": args_str,
+        },
+    }
+
+
+def _fallback_parse_block(raw_block: str):
+    name_m = re.search(r'["\']name["\']\s*:\s*["\']([^"\']+)["\']', raw_block)
+    if not name_m:
+        fn_m = re.search(r'["\']function["\']\s*:\s*["\']?([^"\'\s,}]+)', raw_block)
+        if not fn_m:
+            return None
+        name = fn_m.group(1)
+    else:
+        name = name_m.group(1)
+
+    parsed = {"name": name, "arguments": {}}
+    args_m = re.search(r'["\'](?:arguments|parameters)["\']\s*:\s*', raw_block)
+    if args_m:
+        rest = raw_block[args_m.end():].lstrip()
+        if rest:
+            if rest[0] in ("{", "["):
+                res = extract_balanced_json(rest, 0)
+                if res:
+                    chunk, _ = res
+                    try:
+                        parsed["arguments"] = json.loads(chunk)
+                    except Exception:
+                        parsed["arguments"] = chunk
+            elif rest[0] in ('"', "'"):
+                inner = rest[1:].lstrip()
+                if inner and inner[0] in ("{", "["):
+                    res = extract_balanced_json(inner, 0)
+                    if res:
+                        chunk, _ = res
+                        try:
+                            parsed["arguments"] = json.loads(chunk)
+                        except Exception:
+                            parsed["arguments"] = chunk
+                else:
+                    str_m = re.search(r'^([^"\'\\]*(?:\\.[^"\'\\]*)*)["\']', rest[1:], re.DOTALL)
+                    if str_m:
+                        parsed["arguments"] = str_m.group(1)
+                    else:
+                        parsed["arguments"] = rest[1:]
+    return parsed
+
+
+def _extract_calls_from_inner(raw_inner: str):
+    if raw_inner.startswith("```"):
+        raw_inner = re.sub(r"^```(?:json|xml)?\s*", "", raw_inner)
+        raw_inner = re.sub(r"\s*```$", "", raw_inner)
+    raw_inner = raw_inner.strip()
+    if not raw_inner:
+        return []
+
+    calls = []
+
+    # 1. Direct json.loads
+    try:
+        parsed = json.loads(raw_inner)
+        if isinstance(parsed, dict):
+            c = _extract_single_call(parsed)
+            if c:
+                return [c]
+        elif isinstance(parsed, list):
+            for item in parsed:
+                c = _extract_single_call(item)
+                if c:
+                    calls.append(c)
+            if calls:
+                return calls
+    except Exception:
+        pass
+
+    # 2. raw_decode loop
+    decoder = json.JSONDecoder()
+    idx = 0
+    length = len(raw_inner)
+    items = []
+    has_parse_error = False
+
+    while idx < length:
+        while idx < length and raw_inner[idx] in " \t\r\n,":
+            idx += 1
+        if idx >= length:
+            break
+        try:
+            obj, end = decoder.raw_decode(raw_inner, idx)
+            items.append(obj)
+            idx = end
+        except json.JSONDecodeError:
+            has_parse_error = True
+            break
+
+    while idx < length and raw_inner[idx] in " \t\r\n,":
+        idx += 1
+    if not has_parse_error and idx >= length and items:
+        for item in items:
+            if isinstance(item, list):
+                for sub in item:
+                    c = _extract_single_call(sub)
+                    if c:
+                        calls.append(c)
+            elif isinstance(item, dict):
+                c = _extract_single_call(item)
+                if c:
+                    calls.append(c)
+        if calls:
+            return calls
+
+    # 3. Scanner using balanced braces
+    calls.clear()
+    idx = 0
+    while idx < length:
+        while idx < length and raw_inner[idx] in " \t\r\n,":
+            idx += 1
+        if idx >= length:
+            break
+
+        if raw_inner[idx] in ("{", "["):
+            res = extract_balanced_json(raw_inner, idx)
+            if res:
+                block, end_idx = res
+                obj = None
+                try:
+                    obj = json.loads(block)
+                except Exception:
+                    obj = _fallback_parse_block(block)
+
+                if isinstance(obj, list):
+                    for sub in obj:
+                        c = _extract_single_call(sub)
+                        if c:
+                            calls.append(c)
+                elif isinstance(obj, dict):
+                    c = _extract_single_call(obj)
+                    if c:
+                        calls.append(c)
+                idx = end_idx
+                continue
+
+        idx += 1
+
+    if calls:
+        return calls
+
+    # 4. Ultimate fallback
+    fallback_obj = _fallback_parse_block(raw_inner)
+    if fallback_obj:
+        c = _extract_single_call(fallback_obj)
+        if c:
+            return [c]
+
+    return []
+
+
+def parse_model_response(raw_text: str):
+    raw_text = str(raw_text or "")
+    if not raw_text:
+        return "", []
+    tool_calls = []
+
+    def replacer(match):
+        raw_inner = match.group(1).strip()
+        extracted = _extract_calls_from_inner(raw_inner)
+        if extracted:
+            tool_calls.extend(extracted)
+            return ""
+        return match.group(0)
+
+    remaining_text = TOOL_CALL_REGEX.sub(replacer, raw_text).strip()
+    remaining_text = re.sub(r"```(?:xml|json)?\s*```", "", remaining_text).strip()
+    return remaining_text, tool_calls
+
+
+def messages_to_prompt(messages, tools=None, tool_choice="auto"):
+    if not isinstance(messages, list):
+        if isinstance(messages, dict):
+            messages = [messages]
+        elif isinstance(messages, str):
+            messages = [{"role": "user", "content": messages}]
+        else:
+            messages = []
+
+    # Map call_id -> tool_name across conversation
+    call_id_to_name = {}
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("tool_calls"):
+            for tc in msg.get("tool_calls") or []:
+                if isinstance(tc, dict):
+                    tc_id = tc.get("id")
+                    fn = tc.get("function") or {}
+                    fn_name = fn.get("name")
+                    if tc_id and fn_name:
+                        call_id_to_name[tc_id] = fn_name
+
+    # 1. Identify index of last CAVEMAN reminder across all messages
+    last_caveman_idx = -1
+    for idx, msg in enumerate(messages):
+        if isinstance(msg, dict):
+            raw = flatten_content(msg.get("content"))
+            if "CAVEMAN MODE ACTIVE" in raw:
+                last_caveman_idx = idx
+
+    # 2. Sanitize and prepare cleaned message entries
+    cleaned_messages = []
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "user").lower()
+        content = str(flatten_content(msg.get("content")) or "")
+
+        # Strip buddy tags
+        content = BUDDY_REGEX.sub("", content).strip()
+
+        # Deduplicate caveman reminder: omit or clean from earlier turns
+        if "CAVEMAN MODE ACTIVE" in content and idx != last_caveman_idx:
+            content = CAVEMAN_BLOCK_REGEX.sub("", content).strip()
+
+        # Format assistant tool calls if present
+        tool_calls = msg.get("tool_calls") or []
+        tc_blocks = []
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") or {}
+            fn_name = fn.get("name", "")
+            fn_args = fn.get("arguments", "{}")
+            if isinstance(fn_args, str):
+                try:
+                    fn_args = json.loads(fn_args)
+                except Exception:
+                    pass
+            tc_blocks.append(
+                f"<tool_call>\n{json.dumps({'name': fn_name, 'arguments': fn_args}, ensure_ascii=False)}\n</tool_call>"
+            )
+
+        if tc_blocks:
+            if content:
+                content = content + "\n" + "\n".join(tc_blocks)
+            else:
+                content = "\n".join(tc_blocks)
+
+        # Format tool result role
+        if role in ("tool", "function"):
+            call_id = msg.get("tool_call_id") or msg.get("id") or ""
+            tool_name = msg.get("name") or call_id_to_name.get(call_id, "")
+            tag = f"TOOL RESULT ({tool_name})" if tool_name else (f"TOOL RESULT ({call_id})" if call_id else "TOOL RESULT")
+            role = tag
+
+        # Retain if content is non-empty
         if content:
+            cleaned_messages.append({"role": role, "content": content})
+
+    # 3. Tool instruction formatting
+    tool_inst = format_tool_instructions(tools, tool_choice) if tools else ""
+
+    # 4. Reorder trailing system hooks so they precede the active user turn
+    last_user_idx = -1
+    for i in range(len(cleaned_messages) - 1, -1, -1):
+        if cleaned_messages[i]["role"] == "user":
+            last_user_idx = i
+            break
+
+    if last_user_idx == -1:
+        # No user message exists in the conversation at all
+        cleaned_messages.append({"role": "user", "content": "Please proceed with the above instructions."})
+        last_user_idx = len(cleaned_messages) - 1
+    else:
+        # Move any trailing system/developer messages that follow last_user_idx to before last_user_idx
+        trailing_system_msgs = []
+        other_msgs_after_user = []
+        for i in range(last_user_idx + 1, len(cleaned_messages)):
+            m = cleaned_messages[i]
+            if m["role"] in ("system", "developer"):
+                trailing_system_msgs.append(m)
+            else:
+                other_msgs_after_user.append(m)
+
+        if trailing_system_msgs:
+            user_msg = cleaned_messages[last_user_idx]
+            cleaned_messages = (
+                cleaned_messages[:last_user_idx]
+                + trailing_system_msgs
+                + [user_msg]
+                + other_msgs_after_user
+            )
+
+    # 5. Inject tool instructions into system prompt
+    if tool_inst:
+        if cleaned_messages and cleaned_messages[0]["role"] in ("system", "developer"):
+            cleaned_messages[0]["content"] = f"{tool_inst}\n\n{cleaned_messages[0]['content']}"
+        else:
+            cleaned_messages.insert(0, {"role": "system", "content": tool_inst})
+
+    # 6. Assemble prompt parts
+    parts = []
+    for msg in cleaned_messages:
+        role = msg["role"]
+        content = msg["content"]
+        if role.startswith("TOOL RESULT"):
             parts.append(f"{role}: {content}")
-    return "\n\n".join(parts)
+        else:
+            parts.append(f"{role.upper()}: {content}")
+
+    prompt = "\n\n".join(parts).rstrip()
+    if not prompt.endswith("ASSISTANT:"):
+        prompt += "\n\nASSISTANT:"
+
+    return prompt
 
 
 _cached_ls_info = None
@@ -167,7 +586,7 @@ def rpc(method, payload):
             "x-codeium-csrf-token": info["csrf_token"],
         },
     )
-    with request.urlopen(rpc_request, timeout=90) as response:
+    with request.urlopen(rpc_request, timeout=60) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -265,12 +684,18 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/v1/chat/completions":
             self.respond_json(404, {"error": {"message": f"Unsupported path: {self.path}"}})
             return
+        self.handle_chat_completions()
+
+    def handle_chat_completions(self, payload=None):
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            raw = self.rfile.read(length)
-            payload = json.loads(raw.decode("utf-8")) if raw else {}
+            if payload is None:
+                length = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(length) if length > 0 else b""
+                payload = json.loads(raw.decode("utf-8")) if raw else {}
             request_id = f"ag-{uuid.uuid4().hex}"
-            prompt = messages_to_prompt(payload.get("messages") or [])
+            tools = payload.get("tools")
+            tool_choice = payload.get("tool_choice", "auto")
+            prompt = messages_to_prompt(payload.get("messages") or [], tools=tools, tool_choice=tool_choice)
             requested_model, internal_model = resolve_model_name(payload.get("model"))
             log_traffic(
                 "incoming_request",
@@ -279,6 +704,8 @@ class Handler(BaseHTTPRequestHandler):
                     "path": self.path,
                     "requested_model": requested_model,
                     "prompt": prompt,
+                    "tools": tools,
+                    "tool_choice": tool_choice,
                 },
             )
             upstream_payload = {"prompt": prompt, "model": internal_model}
@@ -291,7 +718,6 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             upstream_response = rpc("GetModelResponse", upstream_payload)
-            content = upstream_response.get("response", "")
             log_traffic(
                 "upstream_response",
                 {
@@ -300,31 +726,88 @@ class Handler(BaseHTTPRequestHandler):
                     "body": upstream_response,
                 },
             )
+
+            raw_response = upstream_response.get("response") if isinstance(upstream_response, dict) else None
+            remaining_text, tool_calls = parse_model_response(raw_response or "")
+
+            # Fail-fast check on empty upstream completion (F5)
+            if (not raw_response or (isinstance(raw_response, str) and not raw_response.strip())) and not tool_calls:
+                log_service(f"Upstream model returned empty completion for request {request_id}")
+                self.respond_json(502, {
+                    "error": {
+                        "message": "Upstream model returned empty completion",
+                        "type": "bad_gateway",
+                        "code": 502,
+                    }
+                })
+                return
+
             is_stream = bool(payload.get("stream"))
             cmpl_id = f"chatcmpl-{uuid.uuid4().hex}"
             created_ts = int(time.time())
 
             if is_stream:
                 self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "keep-alive")
+                self.send_header("Connection", "close")
                 self.end_headers()
+                self.close_connection = True
 
-                chunk1 = {
-                    "id": cmpl_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_ts,
-                    "model": requested_model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"role": "assistant", "content": content},
-                            "finish_reason": None,
+                chunks = []
+                # 1. Text chunk if remaining_text is non-empty
+                if remaining_text:
+                    chunks.append({
+                        "id": cmpl_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_ts,
+                        "model": requested_model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"role": "assistant", "content": remaining_text},
+                                "finish_reason": None,
+                            }
+                        ],
+                    })
+
+                # 2. Segregated tool_calls chunks (F3)
+                if tool_calls:
+                    for idx, tc in enumerate(tool_calls):
+                        delta = {
+                            "tool_calls": [
+                                {
+                                    "index": idx,
+                                    "id": tc["id"],
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc["function"]["name"],
+                                        "arguments": tc["function"]["arguments"],
+                                    },
+                                }
+                            ]
                         }
-                    ],
-                }
-                chunk2 = {
+                        if not remaining_text and idx == 0:
+                            delta["role"] = "assistant"
+                        chunks.append({
+                            "id": cmpl_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_ts,
+                            "model": requested_model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": delta,
+                                    "finish_reason": None,
+                                }
+                            ],
+                        })
+                    finish_reason = "tool_calls"
+                else:
+                    finish_reason = "stop"
+
+                # 3. Final chunk with finish_reason
+                chunks.append({
                     "id": cmpl_id,
                     "object": "chat.completion.chunk",
                     "created": created_ts,
@@ -333,15 +816,34 @@ class Handler(BaseHTTPRequestHandler):
                         {
                             "index": 0,
                             "delta": {},
-                            "finish_reason": "stop",
+                            "finish_reason": finish_reason,
                         }
                     ],
-                }
-                self.wfile.write(f"data: {json.dumps(chunk1)}\n\n".encode("utf-8"))
-                self.wfile.write(f"data: {json.dumps(chunk2)}\n\n".encode("utf-8"))
-                self.wfile.write(b"data: [DONE]\n\n")
-                self.wfile.flush()
+                })
+
+                try:
+                    for chunk in chunks:
+                        self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8"))
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    log_service(f"client disconnected during streaming for request {request_id}")
                 return
+
+            # Non-streaming response (F3)
+            if tool_calls:
+                finish_reason = "tool_calls"
+                message_obj = {
+                    "role": "assistant",
+                    "content": remaining_text if remaining_text else None,
+                    "tool_calls": tool_calls,
+                }
+            else:
+                finish_reason = "stop"
+                message_obj = {
+                    "role": "assistant",
+                    "content": remaining_text,
+                }
 
             response_body = {
                 "id": cmpl_id,
@@ -351,8 +853,8 @@ class Handler(BaseHTTPRequestHandler):
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": content},
-                        "finish_reason": "stop",
+                        "message": message_obj,
+                        "finish_reason": finish_reason,
                     }
                 ],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
@@ -366,12 +868,48 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             self.respond_json(200, response_body)
+        except (TimeoutError, socket.timeout) as exc:
+            log_service(f"upstream timeout: {exc}")
+            self.respond_json(504, {
+                "error": {
+                    "message": "Upstream language server timed out",
+                    "type": "gateway_timeout",
+                    "code": 504,
+                }
+            })
+        except error.URLError as exc:
+            log_service(f"upstream urlerror: {exc}")
+            if isinstance(exc.reason, (socket.timeout, TimeoutError)):
+                self.respond_json(504, {
+                    "error": {
+                        "message": "Upstream language server timed out",
+                        "type": "gateway_timeout",
+                        "code": 504,
+                    }
+                })
+            else:
+                self.respond_json(502, {
+                    "error": {
+                        "message": f"Upstream language server connection failed: {exc.reason}",
+                        "type": "bad_gateway",
+                        "code": 502,
+                    }
+                })
+        except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError, http_client.RemoteDisconnected, RuntimeError) as exc:
+            log_service(f"upstream connection/runtime error: {exc}")
+            self.respond_json(502, {
+                "error": {
+                    "message": f"Upstream language server connection failed: {exc}",
+                    "type": "bad_gateway",
+                    "code": 502,
+                }
+            })
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", "replace")
-            self.respond_json(exc.code, {"error": {"message": body}})
+            self.respond_json(exc.code, {"error": {"message": body, "code": exc.code}})
         except Exception as exc:
             log_service(f"bridge error: {exc}")
-            self.respond_json(500, {"error": {"message": str(exc)}})
+            self.respond_json(500, {"error": {"message": str(exc), "code": 500}})
 
     def log_message(self, *_args):
         return
@@ -384,6 +922,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             self.wfile.write(encoded)
+            self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             return
 
