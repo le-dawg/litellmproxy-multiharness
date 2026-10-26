@@ -12,6 +12,8 @@ from tool_choice_guard import (
     AntigravityCircuitBreaker,
     StripOrphanToolChoiceGuard,
     is_exhaustion_error,
+    is_unstoppable_model,
+    get_unstoppable_code_key,
     STATE_PRIMARY,
     STATE_FAILOVER,
     STATE_PROBING,
@@ -663,6 +665,51 @@ async def test_guard_preserves_unstoppable_ai_credits_models():
             user_api_key_dict={}, cache=None, data=payload, call_type="anthropic_messages"
         )
         assert res["model"] == model_name, f"Expected {model_name} to be preserved, got {res['model']}"
+        assert res.get("stream") is True, f"Expected stream=True for {model_name}"
+        assert "Authorization" in res.get("extra_headers", {})
+        assert res["extra_headers"]["Authorization"].startswith("Bearer csk_")
+        assert res["extra_headers"]["anthropic-version"] == "2023-06-01"
+
+
+def test_is_unstoppable_model():
+    assert is_unstoppable_model("claude-opus-5.5") is True
+    assert is_unstoppable_model("claude-opus-5-5") is True
+    assert is_unstoppable_model("claude-opus-5-5[1m]") is True
+    assert is_unstoppable_model("opus-5.5") is True
+    assert is_unstoppable_model("opus 5.5") is True
+    assert is_unstoppable_model("claude-sonnet-5.5") is True
+    assert is_unstoppable_model("sonnet-5.5") is True
+    assert is_unstoppable_model("sonnet 5.5") is True
+    assert is_unstoppable_model("custom-model", api_base="https://app.unstoppable.ai/api/v1/llm-proxy/anthropic") is True
+
+    # Standard models must NOT be treated as unstoppable
+    assert is_unstoppable_model("claude-3-7-sonnet") is False
+    assert is_unstoppable_model("claude-mythos-5") is False
+    assert is_unstoppable_model("claude-sonnet-5") is False
+    assert is_unstoppable_model("gpt-4o") is False
+    assert is_unstoppable_model("antigravity-flash") is False
+
+
+def test_get_unstoppable_code_key():
+    key = get_unstoppable_code_key()
+    assert key is not None
+    assert key.startswith("csk_")
+
+
+@pytest.mark.asyncio
+async def test_async_pre_request_hook_injects_unstoppable_auth():
+    guard = StripOrphanToolChoiceGuard()
+    req_kwargs = {"stream": False}
+    result = await guard.async_pre_request_hook(
+        model="claude-opus-5.5",
+        messages=[{"role": "user", "content": "hello"}],
+        request_kwargs=req_kwargs,
+    )
+    assert result["stream"] is True
+    assert "Authorization" in result["extra_headers"]
+    assert result["extra_headers"]["Authorization"].startswith("Bearer csk_")
+    assert result["extra_headers"]["anthropic-version"] == "2023-06-01"
+
 
 
 

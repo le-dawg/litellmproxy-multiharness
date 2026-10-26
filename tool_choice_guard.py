@@ -28,6 +28,85 @@ EXHAUSTION_PHRASES = (
     "resource has been exhausted",
 )
 
+# ---------------------------------------------------------------------- #
+#  Unstoppable Code Local Key Resolution                                 #
+# ---------------------------------------------------------------------- #
+
+UNSTOPPABLE_KEY_FILES = (
+    Path("~/.unstoppable-code-anthropic-key").expanduser(),
+    Path("~/.litellm/.unstoppable_key").expanduser(),
+)
+
+
+def get_unstoppable_code_key() -> Optional[str]:
+    """Retrieve the active Unstoppable Code Anthropic API/auth key.
+
+    Priority:
+    1. Dedicated hidden files (~/.unstoppable-code-anthropic-key, ~/.litellm/.unstoppable_key)
+    2. Environment variables (UNSTOPPABLE_CODE_KEY, UNSTOPPABLE_ANTHROPIC_KEY)
+    3. Auto-decryption fallback from ~/.unstoppable-code-secure/canopy-cloud-account.enc via macOS Keychain
+    """
+    import os
+
+    # 1. Hidden config files
+    for path in UNSTOPPABLE_KEY_FILES:
+        try:
+            if path.is_file():
+                content = path.read_text().strip()
+                if content and content.startswith("csk_"):
+                    return content
+        except Exception:
+            pass
+
+    # 2. Environment variables
+    env_token = os.environ.get("UNSTOPPABLE_CODE_KEY") or os.environ.get("UNSTOPPABLE_ANTHROPIC_KEY")
+    if env_token and env_token.strip():
+        return env_token.strip()
+
+    # 3. Dynamic Keychain auto-decrypt fallback
+    enc_file = Path("~/.unstoppable-code-secure/canopy-cloud-account.enc").expanduser()
+    if enc_file.is_file():
+        try:
+            import subprocess
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+            from cryptography.hazmat.primitives import hashes
+
+            cmd = ["security", "find-generic-password", "-w", "-s", "Unstoppable Code Safe Storage"]
+            pw = subprocess.check_output(cmd, timeout=3).strip()
+            with open(enc_file, "rb") as f:
+                enc_data = f.read()
+            kdf = PBKDF2HMAC(algorithm=hashes.SHA1(), length=16, salt=b"saltysalt", iterations=1003)
+            key = kdf.derive(pw)
+            cipher = Cipher(algorithms.AES(key), modes.CBC(b" " * 16))
+            dec = cipher.decryptor().update(enc_data[3:]) + cipher.decryptor().finalize()
+            account = json.loads(dec[:-dec[-1]].decode("utf-8"))
+            extracted = account.get("apiKey")
+            if isinstance(extracted, str) and extracted.startswith("csk_"):
+                try:
+                    for p in UNSTOPPABLE_KEY_FILES:
+                        p.write_text(extracted.strip() + "\n")
+                        p.chmod(0o600)
+                except Exception:
+                    pass
+                return extracted.strip()
+        except Exception as e:
+            verbose_proxy_logger.warning("get_unstoppable_code_key auto-decrypt failed: %s", e)
+
+    return None
+
+
+def is_unstoppable_model(model_name: Optional[str], api_base: Optional[str] = None) -> bool:
+    """Return True if request targets Unstoppable Code Opus 5.5 or Sonnet 5.5."""
+    clean_model = (model_name or "").lower().strip()
+    clean_base = (api_base or "").lower().strip()
+    if "unstoppable.ai" in clean_base:
+        return True
+    return any(
+        target in clean_model
+        for target in ("opus-5.5", "opus-5-5", "opus 5.5", "sonnet-5.5", "sonnet-5-5", "sonnet 5.5")
+    )
+
 
 def is_exhaustion_error(error: Any) -> bool:
     """Return True if error matches known quota or credit exhaustion signatures."""
@@ -419,20 +498,22 @@ class StripOrphanToolChoiceGuard(CustomLogger):
         if isinstance(current_model, str):
             clean_check = current_model.lower().strip()
             # Preserve explicit Unstoppable Code AI credits routing for Opus 5.5 and Sonnet 5.5
-            if any(target in clean_check for target in ("opus-5.5", "opus-5-5", "sonnet-5.5", "sonnet-5-5")):
-                token = getattr(user_api_key_dict, "api_key", None) if user_api_key_dict else None
-                if not token and isinstance(user_api_key_dict, dict):
-                    token = user_api_key_dict.get("api_key") or user_api_key_dict.get("token")
-                if token:
-                    clean_token = token[7:].strip() if token.startswith("Bearer ") else token.strip()
+            if is_unstoppable_model(clean_check):
+                clean_token = get_unstoppable_code_key()
+                if clean_token:
                     data["api_key"] = clean_token
                     if not isinstance(data.get("extra_headers"), dict):
                         data["extra_headers"] = {}
                     data["extra_headers"]["Authorization"] = f"Bearer {clean_token}"
+                    data["extra_headers"]["Content-Type"] = "application/json"
+                    data["extra_headers"]["anthropic-version"] = "2023-06-01"
+                    data["stream"] = True
+
                 verbose_proxy_logger.info(
-                    "StripOrphanToolChoiceGuard: preserving unstoppable ai credits model %s (forwarding auth: %s)",
+                    "StripOrphanToolChoiceGuard: preserving unstoppable ai credits model %s (forwarding auth: %s, stream: %s)",
                     current_model,
-                    bool(token),
+                    bool(clean_token),
+                    data.get("stream"),
                 )
             elif (
                 any(clean_check.startswith(prefix) for prefix in ("claude-", "gpt-", "azure/"))
@@ -522,6 +603,26 @@ class StripOrphanToolChoiceGuard(CustomLogger):
 
         return data
 
+    async def async_pre_request_hook(
+        self, model: str, messages: list[dict], request_kwargs: dict
+    ) -> dict:
+        """Called directly inside anthropic_messages handler before sending upstream."""
+        api_base = request_kwargs.get("api_base")
+        if is_unstoppable_model(model, api_base):
+            clean_token = get_unstoppable_code_key()
+            if clean_token:
+                if not isinstance(request_kwargs.get("extra_headers"), dict):
+                    request_kwargs["extra_headers"] = {}
+                request_kwargs["extra_headers"]["Authorization"] = f"Bearer {clean_token}"
+                request_kwargs["extra_headers"]["Content-Type"] = "application/json"
+                request_kwargs["extra_headers"]["anthropic-version"] = "2023-06-01"
+                request_kwargs["stream"] = True
+                verbose_proxy_logger.info(
+                    "StripOrphanToolChoiceGuard [pre_request_hook]: injected unstoppable auth & stream: True for %s",
+                    model,
+                )
+        return request_kwargs
+
     async def async_pre_call_deployment_hook(
         self, kwargs: dict[str, Any], call_type: Any = None
     ) -> Optional[dict]:
@@ -535,8 +636,6 @@ class StripOrphanToolChoiceGuard(CustomLogger):
                 kwargs.pop(bad_param, None)
 
         # Strip orphan tool_choice / parallel_tool_calls if tools is empty or None
-        # (Crucial when Anthropic web_search tools are extracted into web_search_options,
-        # leaving tools=None while tool_choice remains set to 'auto')
         if "tool_choice" in kwargs or "parallel_tool_calls" in kwargs:
             tools = kwargs.get("tools")
             if not self._has_tools(tools):
@@ -545,6 +644,20 @@ class StripOrphanToolChoiceGuard(CustomLogger):
                 verbose_proxy_logger.debug(
                     "StripOrphanToolChoiceGuard [deployment_hook]: removed tool_choice without tools"
                 )
+
+        # Inject Unstoppable credentials for deployment dispatch
+        clean_model = kwargs.get("model")
+        api_base = kwargs.get("api_base")
+        if is_unstoppable_model(clean_model, api_base):
+            clean_token = get_unstoppable_code_key()
+            if clean_token:
+                kwargs["api_key"] = clean_token
+                if not isinstance(kwargs.get("extra_headers"), dict):
+                    kwargs["extra_headers"] = {}
+                kwargs["extra_headers"]["Authorization"] = f"Bearer {clean_token}"
+                kwargs["extra_headers"]["Content-Type"] = "application/json"
+                kwargs["extra_headers"]["anthropic-version"] = "2023-06-01"
+                kwargs["stream"] = True
 
         return kwargs
 
@@ -583,5 +696,3 @@ class StripOrphanToolChoiceGuard(CustomLogger):
 _default_state_file = Path.home() / ".litellm" / "failover_state.json"
 circuit_breaker = AntigravityCircuitBreaker(state_file=_default_state_file)
 proxy_guard = StripOrphanToolChoiceGuard(circuit_breaker=circuit_breaker)
-
-

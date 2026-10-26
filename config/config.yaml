@@ -26,7 +26,7 @@ litellm_settings:
     sonnet-5-5: claude-sonnet-5.5
     anthropic/claude-sonnet-5.5: claude-sonnet-5.5
     anthropic/claude-sonnet-5-5: claude-sonnet-5.5
-    anthropic/claude-sonnet-5-5[1m]: claude-sonnet-5.5
+    anthropic/claude-sonnet-5.5[1m]: claude-sonnet-5.5
     anthropic/claude-sonnet-5-5[1m]: claude-sonnet-5.5
 
 router_settings:
@@ -170,12 +170,14 @@ model_list:
     litellm_params:
       model: anthropic/claude-opus-5.5
       api_base: https://app.unstoppable.ai/api/v1/llm-proxy/anthropic
+      api_key: os.environ/UNSTOPPABLE_CODE_KEY
       use_bearer_for_custom_base: true
 
   - model_name: claude-sonnet-5.5
     litellm_params:
       model: anthropic/claude-sonnet-5.5
       api_base: https://app.unstoppable.ai/api/v1/llm-proxy/anthropic
+      api_key: os.environ/UNSTOPPABLE_CODE_KEY
       use_bearer_for_custom_base: true
 
   - model_name: glm5.2
