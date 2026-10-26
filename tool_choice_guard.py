@@ -420,9 +420,19 @@ class StripOrphanToolChoiceGuard(CustomLogger):
             clean_check = current_model.lower().strip()
             # Preserve explicit Unstoppable Code AI credits routing for Opus 5.5 and Sonnet 5.5
             if any(target in clean_check for target in ("opus-5.5", "opus-5-5", "sonnet-5.5", "sonnet-5-5")):
+                token = getattr(user_api_key_dict, "api_key", None) if user_api_key_dict else None
+                if not token and isinstance(user_api_key_dict, dict):
+                    token = user_api_key_dict.get("api_key") or user_api_key_dict.get("token")
+                if token:
+                    clean_token = token[7:].strip() if token.startswith("Bearer ") else token.strip()
+                    data["api_key"] = clean_token
+                    if not isinstance(data.get("extra_headers"), dict):
+                        data["extra_headers"] = {}
+                    data["extra_headers"]["Authorization"] = f"Bearer {clean_token}"
                 verbose_proxy_logger.info(
-                    "StripOrphanToolChoiceGuard: preserving unstoppable ai credits model %s",
+                    "StripOrphanToolChoiceGuard: preserving unstoppable ai credits model %s (forwarding auth: %s)",
                     current_model,
+                    bool(token),
                 )
             elif (
                 any(clean_check.startswith(prefix) for prefix in ("claude-", "gpt-", "azure/"))
