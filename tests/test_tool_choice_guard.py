@@ -640,4 +640,30 @@ async def test_guard_integration_post_call_success_hook_records_success():
     assert guard.circuit_breaker.state == STATE_PRIMARY
 
 
+@pytest.mark.asyncio
+async def test_guard_preserves_unstoppable_ai_credits_models():
+    guard = StripOrphanToolChoiceGuard()
+    for model_name in [
+        "claude-opus-5.5",
+        "claude-opus-5-5",
+        "claude-opus-5-5[1m]",
+        "opus-5.5",
+        "anthropic/claude-opus-5.5",
+        "claude-sonnet-5.5",
+        "claude-sonnet-5-5",
+        "claude-sonnet-5-5[1m]",
+        "sonnet-5.5",
+        "anthropic/claude-sonnet-5.5",
+    ]:
+        payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": "ping"}],
+        }
+        res = await guard.async_pre_call_hook(
+            user_api_key_dict={}, cache=None, data=payload, call_type="anthropic_messages"
+        )
+        assert res["model"] == model_name, f"Expected {model_name} to be preserved, got {res['model']}"
+
+
+
 

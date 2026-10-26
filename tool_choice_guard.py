@@ -418,7 +418,13 @@ class StripOrphanToolChoiceGuard(CustomLogger):
         current_model = data.get("model", "")
         if isinstance(current_model, str):
             clean_check = current_model.lower().strip()
-            if (
+            # Preserve explicit Unstoppable Code AI credits routing for Opus 5.5 and Sonnet 5.5
+            if any(target in clean_check for target in ("opus-5.5", "opus-5-5", "sonnet-5.5", "sonnet-5-5")):
+                verbose_proxy_logger.info(
+                    "StripOrphanToolChoiceGuard: preserving unstoppable ai credits model %s",
+                    current_model,
+                )
+            elif (
                 any(clean_check.startswith(prefix) for prefix in ("claude-", "gpt-", "azure/"))
                 or clean_check in ("*", "claude-gpt-5")
             ):

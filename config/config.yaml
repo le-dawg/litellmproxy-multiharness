@@ -8,6 +8,26 @@ litellm_settings:
     claude-gpt-5[1m]: claude-gpt-5
     antigravity: antigravity-flash
     glm-5.2: glm5.2
+    claude-opus-5.5: claude-opus-5.5
+    claude-opus-5-5: claude-opus-5.5
+    claude-opus-5.5[1m]: claude-opus-5.5
+    claude-opus-5-5[1m]: claude-opus-5.5
+    opus-5.5: claude-opus-5.5
+    opus-5-5: claude-opus-5.5
+    anthropic/claude-opus-5.5: claude-opus-5.5
+    anthropic/claude-opus-5-5: claude-opus-5.5
+    anthropic/claude-opus-5.5[1m]: claude-opus-5.5
+    anthropic/claude-opus-5-5[1m]: claude-opus-5.5
+    claude-sonnet-5.5: claude-sonnet-5.5
+    claude-sonnet-5-5: claude-sonnet-5.5
+    claude-sonnet-5.5[1m]: claude-sonnet-5.5
+    claude-sonnet-5-5[1m]: claude-sonnet-5.5
+    sonnet-5.5: claude-sonnet-5.5
+    sonnet-5-5: claude-sonnet-5.5
+    anthropic/claude-sonnet-5.5: claude-sonnet-5.5
+    anthropic/claude-sonnet-5-5: claude-sonnet-5.5
+    anthropic/claude-sonnet-5-5[1m]: claude-sonnet-5.5
+    anthropic/claude-sonnet-5-5[1m]: claude-sonnet-5.5
 
 router_settings:
   num_retries: 3
@@ -146,6 +166,18 @@ model_list:
       api_key: sk-antigravity-local
 
   # External Provider Fallbacks
+  - model_name: claude-opus-5.5
+    litellm_params:
+      model: anthropic/claude-opus-5.5
+      api_base: https://app.unstoppable.ai/api/v1/llm-proxy/anthropic
+      use_bearer_for_custom_base: true
+
+  - model_name: claude-sonnet-5.5
+    litellm_params:
+      model: anthropic/claude-sonnet-5.5
+      api_base: https://app.unstoppable.ai/api/v1/llm-proxy/anthropic
+      use_bearer_for_custom_base: true
+
   - model_name: glm5.2
     litellm_params:
       model: openai/glm5.2
