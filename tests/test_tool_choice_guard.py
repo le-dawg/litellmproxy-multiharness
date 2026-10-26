@@ -13,6 +13,8 @@ from tool_choice_guard import (
     StripOrphanToolChoiceGuard,
     is_exhaustion_error,
     is_unstoppable_model,
+    is_unstoppable_opus_model,
+    is_unstoppable_sonnet_model,
     get_unstoppable_code_key,
     STATE_PRIMARY,
     STATE_FAILOVER,
@@ -643,19 +645,17 @@ async def test_guard_integration_post_call_success_hook_records_success():
 
 
 @pytest.mark.asyncio
-async def test_guard_preserves_unstoppable_ai_credits_models():
+async def test_guard_routes_unstoppable_opus_to_deepseek_v4_pro():
     guard = StripOrphanToolChoiceGuard()
     for model_name in [
         "claude-opus-5.5",
         "claude-opus-5-5",
         "claude-opus-5-5[1m]",
         "opus-5.5",
+        "opus 5.5",
+        "opus[1m]",
         "anthropic/claude-opus-5.5",
-        "claude-sonnet-5.5",
-        "claude-sonnet-5-5",
-        "claude-sonnet-5-5[1m]",
-        "sonnet-5.5",
-        "anthropic/claude-sonnet-5.5",
+        "deepseek-v4-pro",
     ]:
         payload = {
             "model": model_name,
@@ -664,22 +664,60 @@ async def test_guard_preserves_unstoppable_ai_credits_models():
         res = await guard.async_pre_call_hook(
             user_api_key_dict={}, cache=None, data=payload, call_type="anthropic_messages"
         )
-        assert res["model"] == model_name, f"Expected {model_name} to be preserved, got {res['model']}"
+        assert res["model"] == "deepseek-v4-pro", f"Expected deepseek-v4-pro for {model_name}, got {res['model']}"
         assert res.get("stream") is True, f"Expected stream=True for {model_name}"
         assert "Authorization" in res.get("extra_headers", {})
         assert res["extra_headers"]["Authorization"].startswith("Bearer csk_")
         assert res["extra_headers"]["anthropic-version"] == "2023-06-01"
 
 
-def test_is_unstoppable_model():
+@pytest.mark.asyncio
+async def test_guard_routes_unstoppable_sonnet_to_glm_5_3_flash_max_reasoning():
+    guard = StripOrphanToolChoiceGuard()
+    for model_name in [
+        "claude-sonnet-5.5",
+        "claude-sonnet-5-5",
+        "claude-sonnet-5-5[1m]",
+        "sonnet-5.5",
+        "sonnet 5.5",
+        "anthropic/claude-sonnet-5.5",
+        "glm-5.3-flash",
+    ]:
+        payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": "ping"}],
+        }
+        res = await guard.async_pre_call_hook(
+            user_api_key_dict={}, cache=None, data=payload, call_type="anthropic_messages"
+        )
+        assert res["model"] == "glm-5.3-flash", f"Expected glm-5.3-flash for {model_name}, got {res['model']}"
+        assert res.get("stream") is True, f"Expected stream=True for {model_name}"
+        assert res.get("reasoning_effort") == "high", f"Expected high reasoning effort for {model_name}"
+        assert res.get("thinking", {}).get("type") == "enabled"
+        assert res.get("thinking", {}).get("budget_tokens") == 32000
+        assert "Authorization" in res.get("extra_headers", {})
+        assert res["extra_headers"]["Authorization"].startswith("Bearer csk_")
+        assert res["extra_headers"]["anthropic-version"] == "2023-06-01"
+
+
+def test_is_unstoppable_model_helpers():
+    assert is_unstoppable_opus_model("claude-opus-5.5") is True
+    assert is_unstoppable_opus_model("claude-opus-5-5") is True
+    assert is_unstoppable_opus_model("claude-opus-5-5[1m]") is True
+    assert is_unstoppable_opus_model("opus-5.5") is True
+    assert is_unstoppable_opus_model("opus 5.5") is True
+    assert is_unstoppable_opus_model("opus[1m]") is True
+    assert is_unstoppable_opus_model("deepseek-v4-pro") is True
+
+    assert is_unstoppable_sonnet_model("claude-sonnet-5.5") is True
+    assert is_unstoppable_sonnet_model("claude-sonnet-5-5") is True
+    assert is_unstoppable_sonnet_model("claude-sonnet-5-5[1m]") is True
+    assert is_unstoppable_sonnet_model("sonnet-5.5") is True
+    assert is_unstoppable_sonnet_model("sonnet 5.5") is True
+    assert is_unstoppable_sonnet_model("glm-5.3-flash") is True
+
     assert is_unstoppable_model("claude-opus-5.5") is True
-    assert is_unstoppable_model("claude-opus-5-5") is True
-    assert is_unstoppable_model("claude-opus-5-5[1m]") is True
-    assert is_unstoppable_model("opus-5.5") is True
-    assert is_unstoppable_model("opus 5.5") is True
     assert is_unstoppable_model("claude-sonnet-5.5") is True
-    assert is_unstoppable_model("sonnet-5.5") is True
-    assert is_unstoppable_model("sonnet 5.5") is True
     assert is_unstoppable_model("custom-model", api_base="https://app.unstoppable.ai/api/v1/llm-proxy/anthropic") is True
 
     # Standard models must NOT be treated as unstoppable
@@ -697,18 +735,31 @@ def test_get_unstoppable_code_key():
 
 
 @pytest.mark.asyncio
-async def test_async_pre_request_hook_injects_unstoppable_auth():
+async def test_async_pre_request_hook_injects_unstoppable_auth_and_routes():
     guard = StripOrphanToolChoiceGuard()
-    req_kwargs = {"stream": False}
-    result = await guard.async_pre_request_hook(
+    req_kwargs_opus = {"stream": False}
+    result_opus = await guard.async_pre_request_hook(
         model="claude-opus-5.5",
         messages=[{"role": "user", "content": "hello"}],
-        request_kwargs=req_kwargs,
+        request_kwargs=req_kwargs_opus,
     )
-    assert result["stream"] is True
-    assert "Authorization" in result["extra_headers"]
-    assert result["extra_headers"]["Authorization"].startswith("Bearer csk_")
-    assert result["extra_headers"]["anthropic-version"] == "2023-06-01"
+    assert result_opus["stream"] is True
+    assert "Authorization" in result_opus["extra_headers"]
+    assert result_opus["extra_headers"]["Authorization"].startswith("Bearer csk_")
+    assert result_opus["extra_headers"]["anthropic-version"] == "2023-06-01"
+
+    req_kwargs_sonnet = {"stream": False}
+    result_sonnet = await guard.async_pre_request_hook(
+        model="claude-sonnet-5.5",
+        messages=[{"role": "user", "content": "hello"}],
+        request_kwargs=req_kwargs_sonnet,
+    )
+    assert result_sonnet["stream"] is True
+    assert result_sonnet["reasoning_effort"] == "high"
+    assert result_sonnet["thinking"]["budget_tokens"] == 32000
+    assert "Authorization" in result_sonnet["extra_headers"]
+    assert result_sonnet["extra_headers"]["Authorization"].startswith("Bearer csk_")
+    assert result_sonnet["extra_headers"]["anthropic-version"] == "2023-06-01"
 
 
 

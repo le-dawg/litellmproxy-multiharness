@@ -8,26 +8,27 @@ litellm_settings:
     claude-gpt-5[1m]: claude-gpt-5
     antigravity: antigravity-flash
     glm-5.2: glm5.2
-    claude-opus-5.5: claude-opus-5.5
-    claude-opus-5-5: claude-opus-5.5
-    claude-opus-5.5[1m]: claude-opus-5.5
-    claude-opus-5-5[1m]: claude-opus-5.5
-    opus-5.5: claude-opus-5.5
-    opus-5-5: claude-opus-5.5
-    anthropic/claude-opus-5.5: claude-opus-5.5
-    anthropic/claude-opus-5-5: claude-opus-5.5
-    anthropic/claude-opus-5.5[1m]: claude-opus-5.5
-    anthropic/claude-opus-5-5[1m]: claude-opus-5.5
-    claude-sonnet-5.5: claude-sonnet-5.5
-    claude-sonnet-5-5: claude-sonnet-5.5
-    claude-sonnet-5.5[1m]: claude-sonnet-5.5
-    claude-sonnet-5-5[1m]: claude-sonnet-5.5
-    sonnet-5.5: claude-sonnet-5.5
-    sonnet-5-5: claude-sonnet-5.5
-    anthropic/claude-sonnet-5.5: claude-sonnet-5.5
-    anthropic/claude-sonnet-5-5: claude-sonnet-5.5
-    anthropic/claude-sonnet-5.5[1m]: claude-sonnet-5.5
-    anthropic/claude-sonnet-5-5[1m]: claude-sonnet-5.5
+    claude-opus-5.5: deepseek-v4-pro
+    claude-opus-5-5: deepseek-v4-pro
+    claude-opus-5.5[1m]: deepseek-v4-pro
+    claude-opus-5-5[1m]: deepseek-v4-pro
+    opus-5.5: deepseek-v4-pro
+    opus-5-5: deepseek-v4-pro
+    opus[1m]: deepseek-v4-pro
+    anthropic/claude-opus-5.5: deepseek-v4-pro
+    anthropic/claude-opus-5-5: deepseek-v4-pro
+    anthropic/claude-opus-5.5[1m]: deepseek-v4-pro
+    anthropic/claude-opus-5-5[1m]: deepseek-v4-pro
+    claude-sonnet-5.5: glm-5.3-flash
+    claude-sonnet-5-5: glm-5.3-flash
+    claude-sonnet-5.5[1m]: glm-5.3-flash
+    claude-sonnet-5-5[1m]: glm-5.3-flash
+    sonnet-5.5: glm-5.3-flash
+    sonnet-5-5: glm-5.3-flash
+    anthropic/claude-sonnet-5.5: glm-5.3-flash
+    anthropic/claude-sonnet-5-5: glm-5.3-flash
+    anthropic/claude-sonnet-5.5[1m]: glm-5.3-flash
+    anthropic/claude-sonnet-5-5[1m]: glm-5.3-flash
 
 router_settings:
   num_retries: 3
@@ -165,17 +166,32 @@ model_list:
       api_base: http://127.0.0.1:8788/v1
       api_key: sk-antigravity-local
 
+  # Unstoppable AI Credits Deployments
+  - model_name: deepseek-v4-pro
+    litellm_params:
+      model: anthropic/deepseek-v4-pro
+      api_base: https://app.unstoppable.ai/api/v1/llm-proxy/anthropic
+      api_key: os.environ/UNSTOPPABLE_CODE_KEY
+      use_bearer_for_custom_base: true
+
+  - model_name: glm-5.3-flash
+    litellm_params:
+      model: anthropic/glm-5.3-flash
+      api_base: https://app.unstoppable.ai/api/v1/llm-proxy/anthropic
+      api_key: os.environ/UNSTOPPABLE_CODE_KEY
+      use_bearer_for_custom_base: true
+
   # External Provider Fallbacks
   - model_name: claude-opus-5.5
     litellm_params:
-      model: anthropic/claude-opus-5.5
+      model: anthropic/deepseek-v4-pro
       api_base: https://app.unstoppable.ai/api/v1/llm-proxy/anthropic
       api_key: os.environ/UNSTOPPABLE_CODE_KEY
       use_bearer_for_custom_base: true
 
   - model_name: claude-sonnet-5.5
     litellm_params:
-      model: anthropic/claude-sonnet-5.5
+      model: anthropic/glm-5.3-flash
       api_base: https://app.unstoppable.ai/api/v1/llm-proxy/anthropic
       api_key: os.environ/UNSTOPPABLE_CODE_KEY
       use_bearer_for_custom_base: true

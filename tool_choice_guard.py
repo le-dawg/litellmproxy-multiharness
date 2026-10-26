@@ -96,16 +96,43 @@ def get_unstoppable_code_key() -> Optional[str]:
     return None
 
 
+def is_unstoppable_opus_model(model_name: Optional[str]) -> bool:
+    """Return True if request targets Unstoppable Opus 5.5 / DeepSeek V4 Pro."""
+    clean = (model_name or "").lower().strip()
+    return any(
+        target in clean
+        for target in (
+            "opus-5.5",
+            "opus-5-5",
+            "opus 5.5",
+            "opus[1m]",
+            "deepseek-v4-pro",
+            "deepseek/deepseek-v4-pro",
+        )
+    )
+
+
+def is_unstoppable_sonnet_model(model_name: Optional[str]) -> bool:
+    """Return True if request targets Unstoppable Sonnet 5.5 / GLM 5.3 Flash."""
+    clean = (model_name or "").lower().strip()
+    return any(
+        target in clean
+        for target in (
+            "sonnet-5.5",
+            "sonnet-5-5",
+            "sonnet 5.5",
+            "glm-5.3-flash",
+            "glm-5.3",
+        )
+    )
+
+
 def is_unstoppable_model(model_name: Optional[str], api_base: Optional[str] = None) -> bool:
-    """Return True if request targets Unstoppable Code Opus 5.5 or Sonnet 5.5."""
-    clean_model = (model_name or "").lower().strip()
+    """Return True if request targets Unstoppable Code AI credits routing."""
     clean_base = (api_base or "").lower().strip()
     if "unstoppable.ai" in clean_base:
         return True
-    return any(
-        target in clean_model
-        for target in ("opus-5.5", "opus-5-5", "opus 5.5", "sonnet-5.5", "sonnet-5-5", "sonnet 5.5")
-    )
+    return is_unstoppable_opus_model(model_name) or is_unstoppable_sonnet_model(model_name)
 
 
 def is_exhaustion_error(error: Any) -> bool:
@@ -497,8 +524,48 @@ class StripOrphanToolChoiceGuard(CustomLogger):
         current_model = data.get("model", "")
         if isinstance(current_model, str):
             clean_check = current_model.lower().strip()
-            # Preserve explicit Unstoppable Code AI credits routing for Opus 5.5 and Sonnet 5.5
-            if is_unstoppable_model(clean_check):
+            # Explicit Unstoppable Code AI credits routing:
+            # Opus 5.5 -> DeepSeek V4 Pro
+            # Sonnet 5.5 -> GLM 5.3 Flash (max reasoning)
+            if is_unstoppable_opus_model(clean_check):
+                target_unstoppable_model = "deepseek-v4-pro"
+                data["model"] = target_unstoppable_model
+                data["stream"] = True
+                clean_token = get_unstoppable_code_key()
+                if clean_token:
+                    data["api_key"] = clean_token
+                    if not isinstance(data.get("extra_headers"), dict):
+                        data["extra_headers"] = {}
+                    data["extra_headers"]["Authorization"] = f"Bearer {clean_token}"
+                    data["extra_headers"]["Content-Type"] = "application/json"
+                    data["extra_headers"]["anthropic-version"] = "2023-06-01"
+
+                verbose_proxy_logger.warning(
+                    "StripOrphanToolChoiceGuard: routed unstoppable ai credits model %s -> %s (using unstoppable auth info, stream=True)",
+                    current_model,
+                    target_unstoppable_model,
+                )
+            elif is_unstoppable_sonnet_model(clean_check):
+                target_unstoppable_model = "glm-5.3-flash"
+                data["model"] = target_unstoppable_model
+                data["stream"] = True
+                data["reasoning_effort"] = "high"
+                data["thinking"] = {"type": "enabled", "budget_tokens": 32000}
+                clean_token = get_unstoppable_code_key()
+                if clean_token:
+                    data["api_key"] = clean_token
+                    if not isinstance(data.get("extra_headers"), dict):
+                        data["extra_headers"] = {}
+                    data["extra_headers"]["Authorization"] = f"Bearer {clean_token}"
+                    data["extra_headers"]["Content-Type"] = "application/json"
+                    data["extra_headers"]["anthropic-version"] = "2023-06-01"
+
+                verbose_proxy_logger.warning(
+                    "StripOrphanToolChoiceGuard: routed unstoppable ai credits model %s -> %s (max reasoning) (using unstoppable auth info, stream=True)",
+                    current_model,
+                    target_unstoppable_model,
+                )
+            elif is_unstoppable_model(clean_check, data.get("api_base")):
                 clean_token = get_unstoppable_code_key()
                 if clean_token:
                     data["api_key"] = clean_token
@@ -508,12 +575,9 @@ class StripOrphanToolChoiceGuard(CustomLogger):
                     data["extra_headers"]["Content-Type"] = "application/json"
                     data["extra_headers"]["anthropic-version"] = "2023-06-01"
                     data["stream"] = True
-
-                verbose_proxy_logger.info(
-                    "StripOrphanToolChoiceGuard: preserving unstoppable ai credits model %s (forwarding auth: %s, stream: %s)",
+                verbose_proxy_logger.warning(
+                    "StripOrphanToolChoiceGuard: preserving unstoppable ai credits model %s (using unstoppable auth info, stream=True)",
                     current_model,
-                    bool(clean_token),
-                    data.get("stream"),
                 )
             elif (
                 any(clean_check.startswith(prefix) for prefix in ("claude-", "gpt-", "azure/"))
@@ -608,7 +672,7 @@ class StripOrphanToolChoiceGuard(CustomLogger):
     ) -> dict:
         """Called directly inside anthropic_messages handler before sending upstream."""
         api_base = request_kwargs.get("api_base")
-        if is_unstoppable_model(model, api_base):
+        if is_unstoppable_opus_model(model) or (api_base and "unstoppable.ai" in api_base and "deepseek" in str(model)):
             clean_token = get_unstoppable_code_key()
             if clean_token:
                 if not isinstance(request_kwargs.get("extra_headers"), dict):
@@ -617,7 +681,35 @@ class StripOrphanToolChoiceGuard(CustomLogger):
                 request_kwargs["extra_headers"]["Content-Type"] = "application/json"
                 request_kwargs["extra_headers"]["anthropic-version"] = "2023-06-01"
                 request_kwargs["stream"] = True
-                verbose_proxy_logger.info(
+                verbose_proxy_logger.warning(
+                    "StripOrphanToolChoiceGuard [pre_request_hook]: routed unstoppable ai credits model %s -> deepseek-v4-pro (using unstoppable auth info, stream=True)",
+                    model,
+                )
+        elif is_unstoppable_sonnet_model(model) or (api_base and "unstoppable.ai" in api_base and "glm" in str(model)):
+            clean_token = get_unstoppable_code_key()
+            if clean_token:
+                if not isinstance(request_kwargs.get("extra_headers"), dict):
+                    request_kwargs["extra_headers"] = {}
+                request_kwargs["extra_headers"]["Authorization"] = f"Bearer {clean_token}"
+                request_kwargs["extra_headers"]["Content-Type"] = "application/json"
+                request_kwargs["extra_headers"]["anthropic-version"] = "2023-06-01"
+                request_kwargs["stream"] = True
+                request_kwargs["reasoning_effort"] = "high"
+                request_kwargs["thinking"] = {"type": "enabled", "budget_tokens": 32000}
+                verbose_proxy_logger.warning(
+                    "StripOrphanToolChoiceGuard [pre_request_hook]: routed unstoppable ai credits model %s -> glm-5.3-flash (max reasoning) (using unstoppable auth info, stream=True)",
+                    model,
+                )
+        elif is_unstoppable_model(model, api_base):
+            clean_token = get_unstoppable_code_key()
+            if clean_token:
+                if not isinstance(request_kwargs.get("extra_headers"), dict):
+                    request_kwargs["extra_headers"] = {}
+                request_kwargs["extra_headers"]["Authorization"] = f"Bearer {clean_token}"
+                request_kwargs["extra_headers"]["Content-Type"] = "application/json"
+                request_kwargs["extra_headers"]["anthropic-version"] = "2023-06-01"
+                request_kwargs["stream"] = True
+                verbose_proxy_logger.warning(
                     "StripOrphanToolChoiceGuard [pre_request_hook]: injected unstoppable auth & stream: True for %s",
                     model,
                 )
@@ -645,10 +737,34 @@ class StripOrphanToolChoiceGuard(CustomLogger):
                     "StripOrphanToolChoiceGuard [deployment_hook]: removed tool_choice without tools"
                 )
 
-        # Inject Unstoppable credentials for deployment dispatch
+        # Inject Unstoppable credentials and target models for deployment dispatch
         clean_model = kwargs.get("model")
         api_base = kwargs.get("api_base")
-        if is_unstoppable_model(clean_model, api_base):
+        if is_unstoppable_opus_model(clean_model) or (api_base and "unstoppable.ai" in api_base and "deepseek" in str(clean_model)):
+            clean_token = get_unstoppable_code_key()
+            if clean_token:
+                kwargs["api_key"] = clean_token
+                if not isinstance(kwargs.get("extra_headers"), dict):
+                    kwargs["extra_headers"] = {}
+                kwargs["extra_headers"]["Authorization"] = f"Bearer {clean_token}"
+                kwargs["extra_headers"]["Content-Type"] = "application/json"
+                kwargs["extra_headers"]["anthropic-version"] = "2023-06-01"
+                kwargs["stream"] = True
+                kwargs["model"] = "anthropic/deepseek-v4-pro"
+        elif is_unstoppable_sonnet_model(clean_model) or (api_base and "unstoppable.ai" in api_base and "glm" in str(clean_model)):
+            clean_token = get_unstoppable_code_key()
+            if clean_token:
+                kwargs["api_key"] = clean_token
+                if not isinstance(kwargs.get("extra_headers"), dict):
+                    kwargs["extra_headers"] = {}
+                kwargs["extra_headers"]["Authorization"] = f"Bearer {clean_token}"
+                kwargs["extra_headers"]["Content-Type"] = "application/json"
+                kwargs["extra_headers"]["anthropic-version"] = "2023-06-01"
+                kwargs["stream"] = True
+                kwargs["model"] = "anthropic/glm-5.3-flash"
+                kwargs["reasoning_effort"] = "high"
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": 32000}
+        elif is_unstoppable_model(clean_model, api_base):
             clean_token = get_unstoppable_code_key()
             if clean_token:
                 kwargs["api_key"] = clean_token
