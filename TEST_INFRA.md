@@ -78,14 +78,14 @@ Instantiates `service.bin.antigravity_bridge.Handler` on an OS-allocated dynamic
 ### 3.1 Path & Extraction
 - **Fixture Path**: `tests/fixtures/session_7f8bfd5b_turns.json`
 - **Origin**: Historical Claude Code session `/Users/thedawgctor/.claude/projects/-Users-thedawgctor-Desktop-tempfuk-session-finder/7f8bfd5b-a3a4-4526-8022-f82b3d8c5b93.jsonl` (112 entries, 12 user turns).
+- **Publication copy**: Some user turns are paraphrased to remove offensive wording. Personal paths, historical assistant outputs, and unused transcript metadata are omitted; turn order, hooks, recovery/failure flags, and tool schemas are preserved.
 - **Extracted Content**:
   - `session_id`: `7f8bfd5b-a3a4-4526-8022-f82b3d8c5b93`
-  - `total_raw_entries`: 112
   - `total_user_turns`: 12
   - `total_historical_failures`: 8 (Turns 0, 1, 6, 7, 8, 9, 10, 11)
   - `tools`: 5 core OpenAI schemas (`Write`, `Edit`, `Bash`, `AskUserQuestion`, `create_pieces_memory`)
   - `all_tool_names`: Full list of all 175 tool definitions present in session attachments
-  - `turns`: Array of turn objects containing `turn_index`, `user_input`, `system_hooks` (`CAVEMAN MODE ACTIVE`), `is_synthetic_recovery`, `historical_output_tokens`, `historical_failure`, and ready-to-replay `messages`.
+  - `turns`: Array of turn objects containing `turn_index`, `user_input`, `system_hooks` (`CAVEMAN MODE ACTIVE`), `is_synthetic_recovery`, and `historical_failure`. The harness constructs replay messages from the retained input and hooks.
 
 ---
 

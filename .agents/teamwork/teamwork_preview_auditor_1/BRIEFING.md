@@ -33,7 +33,7 @@ Forensic integrity audit of litellmproxy-multiharness codebase to detect hardcod
   - Static analysis of `service/bin/antigravity_bridge.py`: PASS (clean, generic, no hardcoding)
   - Static analysis of `tool_choice_guard.py`: PASS (clean, authentic 502/504 detection and state transitions)
   - Static analysis of `tests/replay_harness.py` & `test_session_replay.py`: PASS (genuine TCP socket tests, no mock bypasses)
-  - Pre-populated artifact check: PASS (zero artifacts outside `.venv`)
+  - Pre-populated artifact check: PASS (checked pre-existing `.log`, `*result*`, and `*output*` files; none found outside `.venv`)
   - Runtime verification: PASS (64/64 tests passed in 10.58s via `uv run python -m pytest`)
   - Empirical adversarial check: PASS (adversarial script executed with 0 errors)
   - Handoff report compiled: PASS (`handoff.md` published)

@@ -34,8 +34,8 @@
      * F12: Automated replay of historical session `7f8bfd5b` with 0 empty turns and 0 recovery loops.
      * Adversarial stress test suites: `tests/test_adversarial_challenger_2.py` (20 tests) and `tests/test_adversarial_tool_calling.py` (39 tests).
 
-3. **Verification Command & Execution Results**:
-   Executed full repository test suite via `uv`:
+3. **Selected Acceptance Suite — Verification Command & Execution Results**:
+   Executed the five-module selected acceptance suite via `uv`:
    ```bash
    cd /Users/thedawgctor/Desktop/litellmproxy-multiharness && VIRTUAL_ENV=.venv uv run python -m pytest tests/test_session_replay.py tests/test_adversarial_tool_calling.py tests/test_adversarial_challenger_2.py tests/test_tool_choice_guard.py tests/test_config_validation.py -v
    ```
@@ -84,7 +84,7 @@ All requirements (R1 through R4) and acceptance criteria have been achieved:
 
 ## 5. Verification Method
 
-To independently verify the entire project:
+To independently run the selected acceptance suite:
 
 ```bash
 cd /Users/thedawgctor/Desktop/litellmproxy-multiharness

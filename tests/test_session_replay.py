@@ -37,6 +37,7 @@ from service.bin import antigravity_bridge as bridge
 from tests.replay_harness import (
     EphemeralBridge,
     MockLanguageServer,
+    MockLanguageServerHandler,
     MockRemoteFallbackServer,
     build_chat_payload,
     load_session_fixture,
@@ -102,6 +103,101 @@ def session_fixture():
 
 class TestTier1FeatureCoverage:
     """Tier 1: Core feature verification for tool emulation, error handling, and hooks."""
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_tool_choice_filters_returned_calls(self, mock_ls, ephemeral_bridge, session_fixture, stream):
+        """Apply tool choice to parsed calls in both JSON and SSE responses."""
+        mock_ls.set_mode("custom", response={"response": (
+            'Visible reply.\n'
+            '<tool_call>{"name":"create_pieces_memory","arguments":{"text":"example"}}</tool_call>\n'
+            '<tool_call>{"name":"Write","arguments":{"content":"first"}}</tool_call>\n'
+            '<tool_call>{"name":"Write","arguments":{"content":"second"}}</tool_call>'
+        )})
+        all_names = ["create_pieces_memory", "Write", "Write"]
+        choices = [
+            (None, all_names),
+            ("auto", all_names),
+            ("required", all_names),
+            ({}, all_names),
+            ({"type": "function", "function": {}}, all_names),
+            ("none", []),
+            ({"type": "function", "function": {"name": "Write"}}, ["Write", "Write"]),
+        ]
+        with ephemeral_bridge.get_client() as client:
+            for tool_choice, expected_names in choices:
+                payload = build_chat_payload(
+                    messages=[{"role": "user", "content": "Respond with text and tools"}],
+                    tools=session_fixture["tools"], tool_choice=tool_choice, stream=stream,
+                )
+                resp = client.post("/v1/chat/completions", json=payload)
+                assert resp.status_code == 200, resp.text
+                if stream:
+                    events = parse_sse_events(resp.text)
+                    assert events[-1] == {"done": True}
+                    deltas = [event["choices"][0]["delta"] for event in events[:-1]]
+                    calls = [call for delta in deltas for call in delta.get("tool_calls", [])]
+                    content = "".join(delta.get("content", "") for delta in deltas)
+                    finish_reason = events[-2]["choices"][0]["finish_reason"]
+                    assert [call["index"] for call in calls] == list(range(len(expected_names)))
+                else:
+                    choice = resp.json()["choices"][0]
+                    calls = choice["message"].get("tool_calls", [])
+                    content = choice["message"]["content"]
+                    finish_reason = choice["finish_reason"]
+                assert content == "Visible reply."
+                assert [call["function"]["name"] for call in calls] == expected_names
+                assert all(call["id"].startswith("call_") for call in calls)
+                if tool_choice == choices[-1][0]:
+                    assert [json.loads(call["function"]["arguments"]) for call in calls] == [
+                        {"content": "first"}, {"content": "second"},
+                    ]
+                assert finish_reason == ("tool_calls" if expected_names else "stop")
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_parsed_or_filtered_empty_completion_returns_502(self, mock_ls, ephemeral_bridge, stream):
+        """Reject empty parsed output before starting either response format."""
+        tool_only = '<tool_call>{"name":"Write","arguments":{}}</tool_call>'
+        cases = [
+            ("```json\n```", None),
+            ("```xml\n```", None),
+            (tool_only, "none"),
+            (tool_only, {"type": "function", "function": {"name": "Edit"}}),
+        ]
+        with ephemeral_bridge.get_client() as client:
+            for raw_response, tool_choice in cases:
+                mock_ls.set_mode("custom", response={"response": raw_response})
+                resp = client.post("/v1/chat/completions", json=build_chat_payload(
+                    messages=[{"role": "user", "content": "Respond"}],
+                    tool_choice=tool_choice, stream=stream,
+                ))
+                assert resp.status_code == 502, resp.text
+                assert resp.headers["Content-Type"] == "application/json"
+                assert resp.json()["error"] == {
+                    "message": "Upstream model returned empty completion",
+                    "type": "bad_gateway", "code": 502,
+                }
+                assert is_failover_error(resp.json())
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_upstream_http_error_preserves_details_as_502(self, mock_ls, ephemeral_bridge, monkeypatch, stream):
+        """Normalize real urlopen HTTP errors without losing their status or body."""
+        mock_ls.set_mode("rpc_error")
+        original_respond = MockLanguageServerHandler.respond_json
+        payload = build_chat_payload(messages=[{"role": "user", "content": "Respond"}], stream=stream)
+        with ephemeral_bridge.get_client() as client:
+            for upstream_status in (400, 403, 429, 500, 503):
+                def respond_http_error(handler, status, data):
+                    original_respond(handler, upstream_status if status == 500 else status, data)
+
+                monkeypatch.setattr(MockLanguageServerHandler, "respond_json", respond_http_error)
+                resp = client.post("/v1/chat/completions", json=payload)
+                assert resp.status_code == 502, resp.text
+                err = resp.json()["error"]
+                assert err["type"] == "bad_gateway"
+                assert err["code"] == 502
+                assert f"HTTP {upstream_status}" in err["message"]
+                assert '"error": "Simulated upstream RPC failure"' in err["message"]
+                assert is_failover_error(resp.json())
 
     def test_tier1_tool_schema_prompt_injection(self, mock_ls, ephemeral_bridge, session_fixture):
         """F1: Verify OpenAI tool schemas are injected into the prompt with <tool_call> instructions."""
@@ -551,6 +647,12 @@ class TestTier4RealWorldSessionReplay:
 
         # Verify historical failures are correctly flagged
         turns = session_fixture["turns"]
+        assert "session_file" not in session_fixture
+        assert "/Users/" not in json.dumps(session_fixture)
+        for turn in turns:
+            assert set(turn) == {
+                "turn_index", "user_input", "is_synthetic_recovery", "system_hooks", "historical_failure",
+            }
         historical_failed_turns = [t for t in turns if t["historical_failure"]]
         assert len(historical_failed_turns) == 8
 

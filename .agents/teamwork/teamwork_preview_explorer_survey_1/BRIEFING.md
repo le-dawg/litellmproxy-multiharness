@@ -6,8 +6,8 @@ Survey antigravity_bridge.py and design in-bridge tool calling emulation & strea
 ## 🔒 My Identity
 - Archetype: explorer
 - Roles: investigator, synthesizer
-- Working directory: /Users/thedawgctor/Desktop/litellmproxy-multiharness/.agents/teamwork/teamwork_preview_explorer_survey_1
-- Original parent: 15e96a95-ed90-42d5-9ead-d1b4d60233e3
+- Working directory: <repository-root>/.agents/teamwork/teamwork_preview_explorer_survey_1
+- Original parent: <parent-session-id>
 - Milestone: Survey Phase (R1: In-Bridge Tool Calling Emulation & Streaming Parser)
 
 ## 🔒 Key Constraints

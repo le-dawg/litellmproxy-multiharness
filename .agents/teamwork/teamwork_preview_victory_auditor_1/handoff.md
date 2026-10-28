@@ -10,9 +10,10 @@
 ## 1. Observation
 
 1. **Phase A — Timeline & Provenance Audit**:
-   - Reconstructed commit history and agent workspace timestamps across `.agents/teamwork/`.
-   - Work started at `01:15` with `ORIGINAL_REQUEST.md`, followed by 3 parallel surveys at `01:31`, initial milestone workers (`worker_m2_1` at `01:39`, `worker_m1_1` at `01:44`, `test_writer_e2e_1` at `01:44`), review and adversarial stress gates (`auditor_1`, `reviewer_1`, `reviewer_2` at `01:48`, `challenger_1` at `01:53`, `challenger_2` at `01:55`), and hardening (`worker_m1_phase2` at `02:03`), concluding with orchestrator verification at `02:04`.
-   - File modification timestamps match the expected iterative sequence (`tests/fixtures/session_7f8bfd5b_turns.json` at 01:31, `tool_choice_guard.py` at 01:33, `tests/replay_harness.py` at 01:34, `tests/test_session_replay.py` at 01:38, `service/bin/antigravity_bridge.py` at 01:59, and `PROJECT.md` at 02:03).
+   - All timeline times below are UTC on 2026-10-26, taken from the retained `Z`-suffixed records under `.agents/teamwork/`.
+   - The request is recorded at `00:14:28Z` in `ORIGINAL_REQUEST.md`; orchestrator dispatch at `00:15:38Z`; survey dispatches at `00:17:07Z`, `00:17:13Z`, and `00:17:19Z`; milestone worker dispatches at `00:28:12Z` (`worker_m1_1`) and `00:28:19Z` (`worker_m2_1`); and an E2E test writer dispatch update at `00:39:18Z` (their respective `DISPATCH.md` files).
+   - Review and audit dispatches are recorded at `00:41:57Z` (`reviewer_1`), `00:42:05Z` (`reviewer_2`), `00:42:13Z` (`challenger_1`), and `00:42:25Z` (`auditor_1`); `challenger_2/BRIEFING.md` is dated `00:50:00Z`. Hardening worker progress is recorded at `01:02:45Z`, followed by orchestrator progress at `01:04:00Z` (their respective `progress.md` files).
+   - The earlier timezone-free filesystem modification times cannot be independently compared to these UTC records: the original filesystem timestamps and timezone were not retained. They are excluded from the timeline evidence.
    - Provenance check: Historical session file `7f8bfd5b-a3a4-4526-8022-f82b3d8c5b93.jsonl` was verified to exist at `/Users/thedawgctor/.claude/projects/-Users-thedawgctor-Desktop-tempfuk-session-finder/7f8bfd5b-a3a4-4526-8022-f82b3d8c5b93.jsonl` and corresponds directly to the fixture turns.
    - Zero pre-populated `.log`, `*result*`, or `*output*` files exist on disk outside `.venv`.
 

@@ -729,9 +729,15 @@ class Handler(BaseHTTPRequestHandler):
 
             raw_response = upstream_response.get("response") if isinstance(upstream_response, dict) else None
             remaining_text, tool_calls = parse_model_response(raw_response or "")
+            if tool_choice == "none":
+                tool_calls = []
+            elif isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+                requested_function = (tool_choice.get("function") or {}).get("name")
+                if requested_function:
+                    tool_calls = [call for call in tool_calls if call["function"]["name"] == requested_function]
 
             # Fail-fast check on empty upstream completion (F5)
-            if (not raw_response or (isinstance(raw_response, str) and not raw_response.strip())) and not tool_calls:
+            if not remaining_text and not tool_calls:
                 log_service(f"Upstream model returned empty completion for request {request_id}")
                 self.respond_json(502, {
                     "error": {
@@ -877,6 +883,16 @@ class Handler(BaseHTTPRequestHandler):
                     "code": 504,
                 }
             })
+        except error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "replace")
+            log_service(f"upstream HTTP error: {exc.code}")
+            self.respond_json(502, {
+                "error": {
+                    "message": f"Upstream language server HTTP {exc.code}: {body}",
+                    "type": "bad_gateway",
+                    "code": 502,
+                }
+            })
         except error.URLError as exc:
             log_service(f"upstream urlerror: {exc}")
             if isinstance(exc.reason, (socket.timeout, TimeoutError)):
@@ -904,9 +920,6 @@ class Handler(BaseHTTPRequestHandler):
                     "code": 502,
                 }
             })
-        except error.HTTPError as exc:
-            body = exc.read().decode("utf-8", "replace")
-            self.respond_json(exc.code, {"error": {"message": body, "code": exc.code}})
         except Exception as exc:
             log_service(f"bridge error: {exc}")
             self.respond_json(500, {"error": {"message": str(exc), "code": 500}})

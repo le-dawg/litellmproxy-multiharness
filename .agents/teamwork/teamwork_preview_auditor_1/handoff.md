@@ -133,7 +133,7 @@ To independently reproduce this forensic audit:
 1. **Verify absence of hardcoded session IDs in production code**:
    ```bash
    cd /Users/thedawgctor/Desktop/litellmproxy-multiharness
-   python3 -c '
+   uv run python -c '
    from pathlib import Path
    bridge = Path("service/bin/antigravity_bridge.py").read_text()
    guard = Path("tool_choice_guard.py").read_text()
