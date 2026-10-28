@@ -1,4 +1,5 @@
 import asyncio
+import litellm
 import pytest
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ from tool_choice_guard import (
     AntigravityCircuitBreaker,
     StripOrphanToolChoiceGuard,
     is_exhaustion_error,
+    is_failover_error,
     is_unstoppable_model,
     is_unstoppable_opus_model,
     is_unstoppable_sonnet_model,
@@ -760,6 +762,257 @@ async def test_async_pre_request_hook_injects_unstoppable_auth_and_routes():
     assert "Authorization" in result_sonnet["extra_headers"]
     assert result_sonnet["extra_headers"]["Authorization"].startswith("Bearer csk_")
     assert result_sonnet["extra_headers"]["anthropic-version"] == "2023-06-01"
+
+def test_is_exhaustion_error_rejects_prompt_or_benign_429_numbers():
+    assert is_exhaustion_error(Exception("Connection failed to 127.0.0.1:4290")) is False
+    assert is_exhaustion_error(Exception("Processed 429 tokens in 1.2s")) is False
+    assert is_exhaustion_error(Exception("SyntaxError on line 429")) is False
+    assert is_exhaustion_error({"prompt": "Can you explain HTTP status code 429?"}) is False
+    assert is_exhaustion_error({"content": "Explain resource_exhausted in gRPC"}) is False
+
+
+@pytest.mark.asyncio
+async def test_async_post_call_failure_hook_ignores_none_exception_with_prompt_in_request_data():
+    guard = StripOrphanToolChoiceGuard()
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
+    # Prompt containing 429 and resource_exhausted in request_data should NOT trip breaker when original_exception is None
+    await guard.async_post_call_failure_hook(
+        request_data={
+            "model": "antigravity-flash-high",
+            "messages": [{"role": "user", "content": "How does HTTP 429 rate limit or resource_exhausted work?"}],
+        },
+        original_exception=None,
+        user_api_key_dict={},
+    )
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
+
+@pytest.mark.asyncio
+async def test_async_post_call_failure_hook_ignores_remote_model_failures():
+    guard = StripOrphanToolChoiceGuard()
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
+    # Failure on remote model should not trip local circuit breaker
+    await guard.async_post_call_failure_hook(
+        request_data={"model": "antigravity-remote-flash-high"},
+        original_exception=Exception("HTTP 429 Too Many Requests"),
+        user_api_key_dict={},
+    )
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
+
+def test_circuit_breaker_record_success_ignores_remote_model():
+    cb = AntigravityCircuitBreaker()
+    cb.trigger_failover()
+    cb._state = STATE_PROBING
+    assert cb.state == STATE_PROBING
+
+    # Success on remote model should NOT close probing
+    res = cb.record_success(model="antigravity-remote-flash-high")
+    assert res is False
+    assert cb.state == STATE_PROBING
+
+    # Success on primary model SHOULD close probing
+    res = cb.record_success(model="antigravity-flash-high")
+    assert res is True
+    assert cb.state == STATE_PRIMARY
+
+
+def test_ranked_tuple_sort_with_dict_does_not_raise_type_error():
+    # Verify that tuples with identical score and label sort by key=lambda x: x[:4] without comparing dicts
+    cfg1 = {"modelId": "m1", "modelOrAlias": {"model": "tgt1"}}
+    cfg2 = {"modelId": "m2", "modelOrAlias": {"model": "tgt2"}}
+    ranked = [
+        (1, 1, 0, "gemini", cfg1),
+        (1, 1, 0, "gemini", cfg2),
+    ]
+    ranked.sort(reverse=True, key=lambda x: x[:4])
+    assert ranked[0][-1] in (cfg1, cfg2)
+
+
+def test_is_failover_error_detects_502_bad_gateway():
+    class DummyHTTPError(Exception):
+        def __init__(self, msg: str, status_code: int):
+            super().__init__(msg)
+            self.status_code = status_code
+
+    # status_code attribute
+    assert is_failover_error(DummyHTTPError("Bad Gateway", 502)) is True
+    assert is_exhaustion_error(DummyHTTPError("Bad Gateway", 502)) is True
+
+    # LiteLLM BadGatewayError
+    bad_gw = litellm.BadGatewayError("Bad Gateway from upstream", "antigravity-flash", "openai")
+    assert is_failover_error(bad_gw) is True
+    assert is_exhaustion_error(bad_gw) is True
+
+    # String representations
+    assert is_failover_error(Exception("HTTP 502 Bad Gateway")) is True
+    assert is_exhaustion_error(Exception("HTTP 502 Bad Gateway")) is True
+    assert is_failover_error("Client error: 502 Bad Gateway") is True
+    assert is_failover_error("status_code: 502") is True
+    assert is_failover_error(Exception("Bad Gateway: connection refused")) is True
+    assert is_failover_error(Exception("502 Server Error: Bad Gateway")) is True
+
+    # Dict structures
+    assert is_failover_error({"status_code": 502}) is True
+    assert is_failover_error({"error_code": 502, "message": "bad gateway"}) is True
+    assert is_failover_error({"code": 502}) is True
+    assert is_failover_error({"status": "bad_gateway"}) is True
+    assert is_failover_error({"type": "bad_gateway"}) is True
+    assert is_failover_error({
+        "error": {
+            "message": "Upstream Antigravity language server returned empty response",
+            "type": "bad_gateway",
+            "code": 502,
+        }
+    }) is True
+    assert is_failover_error('{"error": {"code": 502, "message": "Bad Gateway"}}') is True
+
+
+def test_is_failover_error_detects_504_gateway_timeout():
+    class DummyHTTPError(Exception):
+        def __init__(self, msg: str, status_code: int):
+            super().__init__(msg)
+            self.status_code = status_code
+
+    # status_code attribute
+    assert is_failover_error(DummyHTTPError("Gateway Timeout", 504)) is True
+    assert is_exhaustion_error(DummyHTTPError("Gateway Timeout", 504)) is True
+
+    # String representations
+    assert is_failover_error(Exception("HTTP 504 Gateway Timeout")) is True
+    assert is_exhaustion_error(Exception("HTTP 504 Gateway Timeout")) is True
+    assert is_failover_error("Client error: 504 Gateway Timeout") is True
+    assert is_failover_error("status_code: 504") is True
+    assert is_failover_error(Exception("Gateway Timeout: upstream language server did not respond in time")) is True
+    assert is_failover_error(Exception("504 Server Error: Gateway Time-out")) is True
+
+    # Dict structures
+    assert is_failover_error({"status_code": 504}) is True
+    assert is_failover_error({"error_code": 504, "message": "gateway timeout"}) is True
+    assert is_failover_error({"code": 504}) is True
+    assert is_failover_error({"status": "gateway_timeout"}) is True
+    assert is_failover_error({"type": "gateway_timeout"}) is True
+    assert is_failover_error({
+        "error": {
+            "message": "Gateway Timeout: upstream language server did not respond in time",
+            "type": "gateway_timeout",
+            "code": 504,
+        }
+    }) is True
+    assert is_failover_error('{"error": {"code": 504, "message": "Gateway Timeout"}}') is True
+
+
+def test_is_failover_error_rejects_benign_502_504_numbers():
+    assert is_failover_error(Exception("Connection failed to 127.0.0.1:5020")) is False
+    assert is_failover_error(Exception("Connection failed to 127.0.0.1:5040")) is False
+    assert is_failover_error(Exception("Processed 502 tokens in 1.2s")) is False
+    assert is_failover_error(Exception("Processed 504 tokens in 1.2s")) is False
+    assert is_failover_error(Exception("SyntaxError on line 502")) is False
+    assert is_failover_error(Exception("SyntaxError on line 504")) is False
+    assert is_failover_error({"prompt": "Can you explain HTTP status code 502?"}) is False
+    assert is_failover_error({"prompt": "Can you explain HTTP status code 504?"}) is False
+    assert is_failover_error({"content": "Explain 502 bad gateway error"}) is False
+    assert is_failover_error(None) is False
+    assert is_failover_error("") is False
+
+
+def test_circuit_breaker_record_failure_502_504_transitions_to_failover():
+    class DummyHTTPError(Exception):
+        def __init__(self, msg: str, status_code: int):
+            super().__init__(msg)
+            self.status_code = status_code
+
+    cb = AntigravityCircuitBreaker()
+    assert cb.state == STATE_PRIMARY
+
+    # 502 failure
+    res_502 = cb.record_failure(DummyHTTPError("Bad Gateway", 502))
+    assert res_502 is True
+    assert cb.state == STATE_FAILOVER
+    assert cb.get_target_for_model("antigravity-flash-high") == "antigravity-remote-flash-high"
+
+    # Reset
+    cb.reset()
+    assert cb.state == STATE_PRIMARY
+
+    # 504 failure
+    res_504 = cb.record_failure(DummyHTTPError("Gateway Timeout", 504))
+    assert res_504 is True
+    assert cb.state == STATE_FAILOVER
+    assert cb.get_target_for_model("antigravity-flash-high") == "antigravity-remote-flash-high"
+
+
+@pytest.mark.asyncio
+async def test_guard_integration_post_call_failure_502_triggers_circuit_breaker():
+    guard = StripOrphanToolChoiceGuard()
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
+    exc_502 = litellm.BadGatewayError("Bad Gateway", "antigravity-flash", "openai")
+    await guard.async_post_call_failure_hook(
+        request_data={"model": "antigravity-flash-high"},
+        original_exception=exc_502,
+        user_api_key_dict={},
+    )
+    assert guard.circuit_breaker.state == STATE_FAILOVER
+
+    # Verify that subsequent pre-call requests are routed to remote deployment immediately
+    payload = {
+        "model": "claude-sonnet-5",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    routed = await guard.async_pre_call_hook(
+        user_api_key_dict={}, cache=None, data=payload, call_type="anthropic_messages"
+    )
+    assert routed["model"] == "antigravity-remote-flash-high"
+
+
+@pytest.mark.asyncio
+async def test_guard_integration_post_call_failure_504_triggers_circuit_breaker():
+    guard = StripOrphanToolChoiceGuard()
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
+    exc_504 = Exception("HTTP 504 Gateway Timeout: upstream language server did not respond")
+    await guard.async_post_call_failure_hook(
+        request_data={"model": "antigravity-flash-high"},
+        original_exception=exc_504,
+        user_api_key_dict={},
+    )
+    assert guard.circuit_breaker.state == STATE_FAILOVER
+
+    # Verify that subsequent pre-call requests are routed to remote deployment immediately
+    payload = {
+        "model": "antigravity-flash-low",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    routed = await guard.async_pre_call_hook(
+        user_api_key_dict={}, cache=None, data=payload, call_type="anthropic_messages"
+    )
+    assert routed["model"] == "antigravity-remote-flash-low"
+
+
+@pytest.mark.asyncio
+async def test_guard_integration_post_call_failure_ignores_remote_502_504():
+    guard = StripOrphanToolChoiceGuard()
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
+    # Failures on remote models should NOT trip the local breaker
+    exc_502 = litellm.BadGatewayError("Bad Gateway", "antigravity-remote-flash-high", "openai")
+    await guard.async_post_call_failure_hook(
+        request_data={"model": "antigravity-remote-flash-high"},
+        original_exception=exc_502,
+        user_api_key_dict={},
+    )
+    assert guard.circuit_breaker.state == STATE_PRIMARY
+
+    exc_504 = Exception("HTTP 504 Gateway Timeout")
+    await guard.async_post_call_failure_hook(
+        request_data={"model": "antigravity-remote-flash-high"},
+        original_exception=exc_504,
+        user_api_key_dict={},
+    )
+    assert guard.circuit_breaker.state == STATE_PRIMARY
 
 
 

@@ -6,7 +6,7 @@ PROXY_BASE = "http://127.0.0.1:5596"
 
 def _is_proxy_running() -> bool:
     try:
-        resp = httpx.get(f"{PROXY_BASE}/health", timeout=10.0)
+        resp = httpx.get(f"{PROXY_BASE}/health/liveliness", timeout=5.0)
         return resp.status_code == 200
     except Exception:
         return False
@@ -14,7 +14,7 @@ def _is_proxy_running() -> bool:
 
 @pytest.mark.skipif(not _is_proxy_running(), reason="LiteLLM proxy is not running on 127.0.0.1:5596")
 def test_proxy_health():
-    resp = httpx.get(f"{PROXY_BASE}/health")
+    resp = httpx.get(f"{PROXY_BASE}/health/liveliness")
     assert resp.status_code == 200, f"Proxy health failed: {resp.text}"
 
 
@@ -61,7 +61,7 @@ def test_messages_endpoint_preserves_tool_choice():
             "max_tokens": 16,
             "messages": [{"role": "user", "content": "ping"}],
         },
-        timeout=15.0,
+        timeout=30.0,
     )
     assert resp.status_code == 200, f"/v1/messages failed: {resp.text}"
     result = resp.json()

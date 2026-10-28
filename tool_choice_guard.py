@@ -26,6 +26,19 @@ EXHAUSTION_PHRASES = (
     "resource_exhausted",
     "your ai credits balance is too low to continue",
     "resource has been exhausted",
+    "quota exceeded",
+    "exceeded your current quota",
+    "insufficient_quota",
+)
+
+GATEWAY_FAILOVER_PHRASES = (
+    "502 bad gateway",
+    "504 gateway timeout",
+    "bad gateway",
+    "gateway timeout",
+    "gateway time-out",
+    "bad_gateway",
+    "gateway_timeout",
 )
 
 # ---------------------------------------------------------------------- #
@@ -135,42 +148,61 @@ def is_unstoppable_model(model_name: Optional[str], api_base: Optional[str] = No
     return is_unstoppable_opus_model(model_name) or is_unstoppable_sonnet_model(model_name)
 
 
-def is_exhaustion_error(error: Any) -> bool:
-    """Return True if error matches known quota or credit exhaustion signatures."""
+FAILOVER_PHRASES = (*EXHAUSTION_PHRASES, *GATEWAY_FAILOVER_PHRASES)
+
+FAILOVER_STATUS_CODES = (429, 502, 504, "429", "502", "504")
+
+
+def is_failover_error(error: Any) -> bool:
+    """Return True if error matches known quota exhaustion (429) or upstream gateway failure (502, 504)."""
     if error is None or error == "":
         return False
 
     # Check status code / code attributes on exception or object
     status_code = getattr(error, "status_code", None)
-    if status_code == 429:
+    if status_code in FAILOVER_STATUS_CODES:
         return True
     http_status = getattr(error, "http_status", None)
-    if http_status == 429:
+    if http_status in FAILOVER_STATUS_CODES:
         return True
     code = getattr(error, "code", None)
-    if code in (429, "429"):
+    if code in FAILOVER_STATUS_CODES:
         return True
 
-    # If it is a standard programming syntax/type exception without explicit 429 attribute, reject
+    # Check response attribute if present (e.g. httpx.HTTPStatusError or openai.APIStatusError)
+    response = getattr(error, "response", None)
+    if response is not None:
+        resp_status = getattr(response, "status_code", None) or getattr(response, "status", None)
+        if resp_status in FAILOVER_STATUS_CODES:
+            return True
+
+    # If it is a standard programming syntax/type exception without explicit status code, reject
     if isinstance(error, (SyntaxError, IndentationError, TabError, NameError, TypeError, KeyError)):
         return False
 
-    # Check dict structure
+    # Check dict structure (only inspect error fields, never prompts or messages)
     if isinstance(error, dict):
-        if error.get("status_code") == 429 or error.get("error_code") == 429 or error.get("code") in (429, "429"):
+        if (
+            error.get("status_code") in FAILOVER_STATUS_CODES
+            or error.get("error_code") in FAILOVER_STATUS_CODES
+            or error.get("code") in FAILOVER_STATUS_CODES
+        ):
             return True
         status_val = str(error.get("status", "")).strip().lower()
-        if status_val == "resource_exhausted":
+        if status_val in ("resource_exhausted", "429", "502", "504", "bad_gateway", "gateway_timeout"):
+            return True
+        type_val = str(error.get("type", "")).strip().lower()
+        if type_val in ("bad_gateway", "gateway_timeout"):
             return True
         err_sub = error.get("error")
         if isinstance(err_sub, dict):
-            if is_exhaustion_error(err_sub):
+            if is_failover_error(err_sub):
                 return True
-        dict_str = json.dumps(error).lower()
-        for phrase in EXHAUSTION_PHRASES:
-            if phrase in dict_str:
+        elif isinstance(err_sub, str):
+            if is_failover_error(err_sub):
                 return True
-        if re.search(r"\b429\b", dict_str):
+        msg = error.get("message")
+        if isinstance(msg, str) and is_failover_error(msg):
             return True
         return False
 
@@ -182,32 +214,44 @@ def is_exhaustion_error(error: Any) -> bool:
     if (stripped.startswith("{") and stripped.endswith("}")) or (stripped.startswith("[") and stripped.endswith("]")):
         try:
             parsed = json.loads(stripped)
-            if isinstance(parsed, dict) and is_exhaustion_error(parsed):
+            if isinstance(parsed, dict) and is_failover_error(parsed):
                 return True
         except Exception:
             pass
 
     text_lower = text.lower()
 
-    # Check known exhaustion phrases
-    for phrase in EXHAUSTION_PHRASES:
+    # Check known failover phrases (exhaustion + gateway errors)
+    for phrase in FAILOVER_PHRASES:
         if phrase in text_lower:
             return True
 
-    # Check 429 pattern, ensuring it is not "line 429"
-    if re.search(r"\b429\b", text_lower):
-        if not re.search(r"\bline\s+429\b", text_lower):
-            return True
+    # Check structured 429, 502, 504 status/error mentions (avoid bare token counts, line numbers, port numbers)
+    if re.search(r"\b(?:status(?:_code)?|http|code|error|err|rate[_\s]limit)\s*[:=]?\s*(?:429|502|504)\b", text_lower):
+        return True
+    if re.search(r"\b429\s+(?:too many requests|rate limit|quota|exhausted)", text_lower):
+        return True
+    if re.search(r"\b502\s+(?:bad gateway|gateway error|gateway|upstream|server error)", text_lower):
+        return True
+    if re.search(r"\b504\s+(?:gateway timeout|gateway time-out|timed? out|gateway)", text_lower):
+        return True
+    if "too many requests" in text_lower and ("rate" in text_lower or "limit" in text_lower or "429" in text_lower):
+        return True
 
     # Check args or response attributes if present
     args = getattr(error, "args", ())
     for arg in args:
-        if isinstance(arg, dict) and is_exhaustion_error(arg):
+        if isinstance(arg, dict) and is_failover_error(arg):
             return True
-        elif isinstance(arg, str) and is_exhaustion_error(arg):
+        elif isinstance(arg, str) and is_failover_error(arg):
             return True
 
     return False
+
+
+def is_exhaustion_error(error: Any) -> bool:
+    """Return True if error matches known quota exhaustion or upstream gateway failure signatures."""
+    return is_failover_error(error)
 
 
 class AntigravityCircuitBreaker:
@@ -275,7 +319,7 @@ class AntigravityCircuitBreaker:
         self._save_state(error)
 
     def record_failure(self, error: Any = None) -> bool:
-        if error is not None and not is_exhaustion_error(error):
+        if error is not None and not is_failover_error(error):
             return False
 
         self._state = STATE_FAILOVER
@@ -284,6 +328,10 @@ class AntigravityCircuitBreaker:
         return True
 
     def record_success(self, model: Optional[str] = None) -> bool:
+        # Ignore success on remote fallback models so they don't prematurely close probing
+        if model and "antigravity-remote" in model:
+            return False
+
         if self.state == STATE_PROBING:
             self._state = STATE_PRIMARY
             self._last_failure_time = None
@@ -786,11 +834,21 @@ class StripOrphanToolChoiceGuard(CustomLogger):
         *args: Any,
         **kwargs: Any,
     ) -> Optional[Any]:
-        err = original_exception if original_exception is not None else request_data
-        if is_exhaustion_error(err):
-            self.circuit_breaker.record_failure(err)
+        if original_exception is None:
+            return None
+
+        # Ignore failures from remote fallback models
+        model = (request_data.get("model") or "") if isinstance(request_data, dict) else ""
+        if "antigravity-remote" in model:
+            verbose_proxy_logger.debug(
+                "StripOrphanToolChoiceGuard: Ignoring failure on remote model %s", model
+            )
+            return None
+
+        if is_failover_error(original_exception):
+            self.circuit_breaker.record_failure(original_exception)
             verbose_proxy_logger.warning(
-                "StripOrphanToolChoiceGuard: Exhaustion error detected (%s). Circuit breaker switched to %s",
+                "StripOrphanToolChoiceGuard: Failover error detected (%s). Circuit breaker switched to %s",
                 original_exception,
                 self.circuit_breaker.state,
             )
