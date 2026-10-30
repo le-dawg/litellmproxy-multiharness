@@ -503,7 +503,7 @@ _cached_model_map_expiry = 0.0
 def discover_ls(force_refresh=False):
     global _cached_ls_info, _cached_ls_expiry
     now = time.time()
-    if not force_refresh and _cached_ls_info and now < _cached_ls_expiry:
+    if not force_refresh and _cached_ls_info:
         try:
             port = int(_cached_ls_info["address"].split(":")[1])
             if port_ready(port):
@@ -533,7 +533,7 @@ def discover_ls(force_refresh=False):
                     "csrf_token": csrf_token,
                 }
                 _cached_ls_info = info
-                _cached_ls_expiry = now + 10.0
+                _cached_ls_expiry = now + 300.0
                 return info
     return None
 
@@ -561,18 +561,17 @@ def port_ready(port):
         return False
 
 
-def ensure_ls(timeout_seconds=30):
+def ensure_ls(timeout_seconds=5):
     info = discover_ls()
     if info:
         return info
-    subprocess.run(["open", "-a", APP_PATH], check=False)
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
+        time.sleep(1)
         info = discover_ls(force_refresh=True)
         if info:
             return info
-        time.sleep(1)
-    raise RuntimeError("Antigravity language server did not become ready")
+    raise RuntimeError("Antigravity language server is not running")
 
 
 def rpc(method, payload):
