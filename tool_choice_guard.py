@@ -41,6 +41,17 @@ GATEWAY_FAILOVER_PHRASES = (
     "gateway_timeout",
 )
 
+CANCELLATION_PHRASES = (
+    "canceled",
+    "cancelled",
+    "context canceled",
+    "context cancelled",
+    "client closed",
+    "client_closed_request",
+    "stream reading error",
+    "client closed request",
+)
+
 FAILOVER_PHRASES = (*EXHAUSTION_PHRASES, *GATEWAY_FAILOVER_PHRASES)
 
 FAILOVER_STATUS_CODES = (429, 502, 504, "429", "502", "504")
@@ -51,14 +62,27 @@ def is_failover_error(error: Any) -> bool:
     if error is None or error == "":
         return False
 
+    # Check string representation for cancellations or 499 early
+    text = str(error)
+    text_lower = text.lower()
+    for phrase in CANCELLATION_PHRASES:
+        if phrase in text_lower:
+            return False
+
     # Check status code / code attributes on exception or object
     status_code = getattr(error, "status_code", None)
+    if status_code in (400, 404, 499, "400", "404", "499"):
+        return False
     if status_code in FAILOVER_STATUS_CODES:
         return True
     http_status = getattr(error, "http_status", None)
+    if http_status in (400, 404, 499, "400", "404", "499"):
+        return False
     if http_status in FAILOVER_STATUS_CODES:
         return True
     code = getattr(error, "code", None)
+    if code in (400, 404, 499, "400", "404", "499"):
+        return False
     if code in FAILOVER_STATUS_CODES:
         return True
 
@@ -66,6 +90,8 @@ def is_failover_error(error: Any) -> bool:
     response = getattr(error, "response", None)
     if response is not None:
         resp_status = getattr(response, "status_code", None) or getattr(response, "status", None)
+        if resp_status in (400, 404, 499, "400", "404", "499"):
+            return False
         if resp_status in FAILOVER_STATUS_CODES:
             return True
 
@@ -76,15 +102,25 @@ def is_failover_error(error: Any) -> bool:
     # Check dict structure (only inspect error fields, never prompts or messages)
     if isinstance(error, dict):
         if (
+            error.get("status_code") in (400, 404, 499)
+            or error.get("error_code") in (400, 404, 499)
+            or error.get("code") in (400, 404, 499)
+        ):
+            return False
+        if (
             error.get("status_code") in FAILOVER_STATUS_CODES
             or error.get("error_code") in FAILOVER_STATUS_CODES
             or error.get("code") in FAILOVER_STATUS_CODES
         ):
             return True
         status_val = str(error.get("status", "")).strip().lower()
+        if any(p in status_val for p in CANCELLATION_PHRASES) or status_val == "499":
+            return False
         if status_val in ("resource_exhausted", "429", "502", "504", "bad_gateway", "gateway_timeout"):
             return True
         type_val = str(error.get("type", "")).strip().lower()
+        if type_val in ("client_closed_request", "invalid_request_error", "not_found_error"):
+            return False
         if type_val in ("bad_gateway", "gateway_timeout"):
             return True
         err_sub = error.get("error")
@@ -99,9 +135,6 @@ def is_failover_error(error: Any) -> bool:
             return True
         return False
 
-    # Check string representation
-    text = str(error)
-
     # Check if string is serialized JSON
     stripped = text.strip()
     if (stripped.startswith("{") and stripped.endswith("}")) or (stripped.startswith("[") and stripped.endswith("]")):
@@ -111,8 +144,6 @@ def is_failover_error(error: Any) -> bool:
                 return True
         except Exception:
             pass
-
-    text_lower = text.lower()
 
     # Check known failover phrases (exhaustion + gateway errors)
     for phrase in FAILOVER_PHRASES:
@@ -243,6 +274,15 @@ class AntigravityCircuitBreaker:
             return model
         if model.startswith("antigravity-"):
             return "antigravity-remote-" + model[len("antigravity-"):]
+        if "sonnet" in model:
+            effort = "high"
+            if "low" in model:
+                effort = "low"
+            elif "medium" in model:
+                effort = "medium"
+            return f"antigravity-remote-flash-{effort}"
+        if "opus" in model:
+            return "antigravity-remote-opus-4.6"
         return model
 
     @staticmethod
@@ -440,10 +480,13 @@ class StripOrphanToolChoiceGuard(CustomLogger):
         clean = raw.split("/")[-1]
         if "opus" in clean or "mythos" in clean:
             return "antigravity-opus-4.6"
+        if "sonnet-5-5" in clean or "sonnet-5.5" in clean or clean in ("sonnet", "antigravity-sonnet"):
+            resolved_effort = "high" if effort == "default" else effort
+            return f"claude-sonnet-5-5-{resolved_effort}"
         if "haiku" in clean:
             resolved_effort = "low" if effort == "default" else effort
             return f"antigravity-flash-{resolved_effort}"
-        # Default family: Sonnet, claude-gpt-5, gpt-5.4, gpt-*, wildcard
+        # Default family: Sonnet legacy (claude-sonnet-5, claude-sonnet-4-6), claude-gpt-5, gpt-5.4, gpt-*, wildcard
         resolved_effort = "high" if effort == "default" else effort
         return f"antigravity-flash-{resolved_effort}"
 
@@ -597,6 +640,13 @@ class StripOrphanToolChoiceGuard(CustomLogger):
             verbose_proxy_logger.debug(
                 "StripOrphanToolChoiceGuard: Ignoring failure on remote model %s", model
             )
+            exc_str = str(original_exception).lower()
+            if "no route to host" in exc_str or "connection refused" in exc_str or "connecterror" in exc_str:
+                verbose_proxy_logger.warning(
+                    "StripOrphanToolChoiceGuard: Remote endpoint unreachable (%s). Resetting circuit breaker to primary.",
+                    original_exception,
+                )
+                self.circuit_breaker.reset()
             return None
 
         if is_failover_error(original_exception):

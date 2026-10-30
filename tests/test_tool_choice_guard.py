@@ -282,6 +282,14 @@ async def test_resolve_antigravity_target():
     assert guard._resolve_antigravity_target("claude-mythos-5", "high") == "antigravity-opus-4.6"
     assert guard._resolve_antigravity_target("claude-mythos-5", "low") == "antigravity-opus-4.6"
 
+    # claude-sonnet-5-5 and claude-sonnet-5.5 route to claude-sonnet-5-5-{effort}
+    assert guard._resolve_antigravity_target("claude-sonnet-5-5", "default") == "claude-sonnet-5-5-high"
+    assert guard._resolve_antigravity_target("claude-sonnet-5-5", "high") == "claude-sonnet-5-5-high"
+    assert guard._resolve_antigravity_target("claude-sonnet-5-5", "medium") == "claude-sonnet-5-5-medium"
+    assert guard._resolve_antigravity_target("claude-sonnet-5-5", "low") == "claude-sonnet-5-5-low"
+    assert guard._resolve_antigravity_target("claude-sonnet-5.5", "default") == "claude-sonnet-5-5-high"
+    assert guard._resolve_antigravity_target("sonnet", "default") == "claude-sonnet-5-5-high"
+
 
 @pytest.mark.asyncio
 async def test_async_pre_call_hook_rewrites_model_and_injects_reasoning_effort():
@@ -795,6 +803,18 @@ def test_is_failover_error_rejects_benign_502_504_numbers():
     assert is_failover_error({"content": "Explain 502 bad gateway error"}) is False
     assert is_failover_error(None) is False
     assert is_failover_error("") is False
+
+
+def test_is_failover_error_rejects_cancellations_and_499():
+    assert is_failover_error(Exception("Upstream language server HTTP 499: context canceled")) is False
+    assert is_failover_error(Exception("stream reading error: context canceled")) is False
+    assert is_failover_error({"status_code": 499, "message": "Client closed request"}) is False
+    assert is_failover_error({"type": "client_closed_request", "code": 499}) is False
+    assert is_failover_error('{"error": {"code": 499, "message": "stream reading error: context canceled"}}') is False
+    assert is_failover_error("context canceled") is False
+    assert is_failover_error("Client closed request") is False
+    assert is_failover_error({"status_code": 400, "message": "invalid request"}) is False
+    assert is_failover_error({"status_code": 404, "message": "not found"}) is False
 
 
 def test_circuit_breaker_record_failure_502_504_transitions_to_failover():
