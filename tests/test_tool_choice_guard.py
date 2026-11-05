@@ -1015,6 +1015,321 @@ async def test_guard_integration_post_call_failure_ignores_remote_502_504():
     assert guard.circuit_breaker.state == STATE_PRIMARY
 
 
+# ============================================================================ #
+# 9. Regression Locking: Benign Filter Failover Precision Tests                #
+# ============================================================================ #
+
+class TestFailoverBenignFilterRegression:
+    """Regression-locking tests for legitimate gateway/rate-limit failover errors.
+
+    Verifies that error strings containing host IP:port, traceback line numbers,
+    or token statistics are NOT falsely suppressed by benign false-positive filters.
+    """
+
+    @pytest.mark.parametrize(
+        "failover_string",
+        [
+            "HTTPConnectionPool(host=127.0.0.1:5596): 502 Bad Gateway",
+            "Upstream proxy failure at 192.168.1.100:8000: 502 Bad Gateway",
+            "502 Bad Gateway from 10.0.0.15:3000",
+            "HTTPConnectionPool(host='127.0.0.1', port=5596): Max retries exceeded (Caused by ResponseError('502 Bad Gateway'))",
+        ],
+    )
+    def test_failover_502_with_host_ip_port_evaluates_true(self, failover_string: str) -> None:
+        """Legitimate 502 Bad Gateway with host/port must evaluate to True."""
+        assert is_failover_error(failover_string) is True
+        assert is_failover_error(Exception(failover_string)) is True
+        assert is_exhaustion_error(failover_string) is True
+
+    @pytest.mark.parametrize(
+        "failover_string",
+        [
+            "Anthropic error: 429 Too Many Requests - prompt_tokens: 150, completion_tokens: 25",
+            "Rate limit: 429 Too Many Requests (prompt_tokens: 150)",
+            "Rate limit reached: 429 Too Many Requests (token_count: 4000)",
+            "Error: 429 quota exceeded: total_tokens=15000",
+        ],
+    )
+    def test_failover_429_with_token_metadata_evaluates_true(self, failover_string: str) -> None:
+        """Legitimate 429 Too Many Requests with token metadata must evaluate to True."""
+        assert is_failover_error(failover_string) is True
+        assert is_failover_error(Exception(failover_string)) is True
+        assert is_exhaustion_error(failover_string) is True
+
+    @pytest.mark.parametrize(
+        "failover_string",
+        [
+            "Gateway failure at line 42: 504 Gateway Timeout",
+            "Exception at line 105: 504 Gateway Time-out",
+            "Gateway Timeout at line 7: upstream server did not respond",
+        ],
+    )
+    def test_failover_504_with_line_numbers_evaluates_true(self, failover_string: str) -> None:
+        """Legitimate 504 Gateway Timeout with line numbers must evaluate to True."""
+        assert is_failover_error(failover_string) is True
+        assert is_failover_error(Exception(failover_string)) is True
+        assert is_exhaustion_error(failover_string) is True
+
+    @pytest.mark.parametrize(
+        "failover_string",
+        [
+            "Canopy error: 402 Payment Required (consumed 50 tokens)",
+            "Canopy error: status 402 (consumed 50 tokens)",
+            "Canopy error: 402 payment required - proxy at 127.0.0.1:5596",
+        ],
+    )
+    def test_canopy_402_with_token_or_host_evaluates_true(self, failover_string: str) -> None:
+        """Canopy 402 payment exhaustion with token counts or proxy host must evaluate to True."""
+        assert is_failover_error(failover_string) is True
+        assert is_failover_error(Exception(failover_string)) is True
+        assert is_exhaustion_error(failover_string) is True
+
+    @pytest.mark.parametrize(
+        "benign_string",
+        [
+            "token_count: 402",
+            "tokens: 402",
+            "prompt_tokens: 402",
+            "completion_tokens: 402",
+            "total_tokens: 402",
+            "Connected to 10.0.0.1:402",
+            "Connection to 10.0.0.1:402 failed",
+            "Connected to 192.168.1.50:402",
+            "explanation of 402",
+            "user prompt asking about 402",
+            "HTTP 402 error explanation in message body",
+            "Connection failed to 127.0.0.1:5020",
+            "Connection failed to 127.0.0.1:5040",
+            "Processed 502 tokens in 1.2s",
+            "Processed 504 tokens in 1.2s",
+            "SyntaxError on line 502",
+            "SyntaxError on line 504",
+            "SyntaxError on line 402",
+            "Port 402 is closed",
+            "found 402 results in database query",
+            "found 502 results in database query",
+        ],
+    )
+    def test_benign_strings_without_status_codes_evaluate_false(self, benign_string: str) -> None:
+        """Benign mentions of numbers without HTTP status/error context must evaluate to False."""
+        assert is_failover_error(benign_string) is False
+        assert is_failover_error(Exception(benign_string)) is False
+        assert is_exhaustion_error(benign_string) is False
+
+    def test_circuit_breaker_trips_on_proxy_host_502(self) -> None:
+        """Circuit breaker must trip to FAILOVER when encountering 502 on local proxy port."""
+        cb = AntigravityCircuitBreaker()
+        assert cb.state == STATE_PRIMARY
+
+        exc = Exception("HTTPConnectionPool(host=127.0.0.1:5596): 502 Bad Gateway")
+        res = cb.record_failure(exc)
+        assert res is True
+        assert cb.state == STATE_FAILOVER
+        assert cb.get_target_for_model("antigravity-flash-high") == "antigravity-remote-flash-high"
+
+
+# ============================================================================ #
+# Milestone 3 (Phase 3): Hook Refactoring, Rotation & Pause Guard Tests        #
+# ============================================================================ #
+
+import httpx
+import re
+import yaml
+from service.agentic.endpoint_abstraction.wallet_manager import WalletManager
+from service.agentic.endpoint_abstraction.pause_manager import PauseManager
+
+
+@pytest.mark.asyncio
+async def test_deployment_hook_injects_wallet_manager_active_key(tmp_path: Path):
+    """Verify async_pre_call_deployment_hook dynamically injects active key from WalletManager."""
+    keystore_path = tmp_path / "unstoppable_wallets.json"
+    wm = WalletManager(keystore_path=keystore_path, auto_create=True)
+    wm.add_wallet("csk_dynamic_test_key_11111111", wallet_id="w1", set_active=True)
+
+    guard = StripOrphanToolChoiceGuard(wallet_manager=wm)
+    kwargs = {
+        "model": "deepseek-v4-pro",
+        "api_base": "https://app.unstoppable.ai/api/v1/llm-proxy/anthropic",
+        "stream": False,
+    }
+    res = await guard.async_pre_call_deployment_hook(kwargs)
+
+    assert res["api_key"] == "csk_dynamic_test_key_11111111"
+    assert res["extra_headers"]["Authorization"] == "Bearer csk_dynamic_test_key_11111111"
+    assert res["stream"] is True
+    assert res["extra_headers"]["anthropic-version"] == "2023-06-01"
+
+
+@pytest.mark.asyncio
+async def test_deployment_hook_fast_fails_when_pause_manager_is_paused(tmp_path: Path):
+    """Verify async_pre_call_deployment_hook raises 402 HTTPException when PauseManager is paused."""
+    lock_path = tmp_path / "unstoppable_pause.lock"
+    pm = PauseManager(lock_path=lock_path)
+    pm.pause(
+        reason="All wallets exhausted (personal_wallet_empty)",
+        correlation_id="req_canopy_test_123",
+    )
+
+    guard = StripOrphanToolChoiceGuard(pause_manager=pm)
+    kwargs = {
+        "model": "deepseek-v4-pro",
+        "api_base": "https://app.unstoppable.ai/api/v1/llm-proxy/anthropic",
+    }
+    with pytest.raises(Exception) as exc_info:
+        await guard.async_pre_call_deployment_hook(kwargs)
+
+    assert getattr(exc_info.value, "status_code", None) == 402
+    detail = getattr(exc_info.value, "detail", {})
+    assert "error" in detail
+    assert detail["error"]["code"] == 402
+    assert "Unstoppable AI Resource Depleted" in detail["error"]["message"]
+    assert detail["error"]["canopy_correlation_id"] == "req_canopy_test_123"
+
+
+@pytest.mark.asyncio
+async def test_deployment_hook_does_not_fast_fail_for_antigravity_models_when_paused(tmp_path: Path):
+    """Verify pause lock on Unstoppable endpoints does not block standard Antigravity models."""
+    lock_path = tmp_path / "unstoppable_pause.lock"
+    pm = PauseManager(lock_path=lock_path)
+    pm.pause(reason="All wallets exhausted", correlation_id="req_canopy_test_456")
+
+    guard = StripOrphanToolChoiceGuard(pause_manager=pm)
+    kwargs = {
+        "model": "antigravity-flash",
+        "api_base": "http://127.0.0.1:8788/v1",
+        "tools": None,
+    }
+    res = await guard.async_pre_call_deployment_hook(kwargs)
+    assert res["model"] == "antigravity-flash"
+
+
+@pytest.mark.asyncio
+async def test_post_call_failure_rotates_wallet_on_canopy_402(tmp_path: Path):
+    """Verify post_call_failure hook rotates active wallet when Canopy 402 is classified."""
+    keystore_path = tmp_path / "unstoppable_wallets.json"
+    wm = WalletManager(keystore_path=keystore_path, auto_create=True)
+    wm.add_wallet("csk_key_alpha_11111111", wallet_id="w1", wallet_type="personal", set_active=True)
+    wm.add_wallet("csk_key_beta_22222222", wallet_id="w2", wallet_type="org")
+
+    assert wm.active_wallet_id == "w1"
+
+    guard = StripOrphanToolChoiceGuard(wallet_manager=wm)
+    resp = httpx.Response(
+        status_code=402,
+        json={"error": {"reason": "personal_wallet_empty", "canopy_proxy": "CANOPY_AI_CREDITS_PROXY"}},
+        headers={"x-canopy-correlation-id": "req_canopy_rotate_789"},
+        request=httpx.Request("POST", "https://app.unstoppable.ai/api/v1/llm-proxy/anthropic/v1/messages"),
+    )
+    exc_402 = httpx.HTTPStatusError(
+        message="402 Payment Required: personal_wallet_empty",
+        request=resp.request,
+        response=resp,
+    )
+
+    await guard.async_post_call_failure_hook(
+        request_data={"model": "deepseek-v4-pro", "api_base": "https://app.unstoppable.ai/api/v1/llm-proxy/anthropic"},
+        original_exception=exc_402,
+        user_api_key_dict={},
+    )
+
+    # Active wallet should now be w2
+    assert wm.active_wallet_id == "w2"
+    assert wm.get_active_key() == "csk_key_beta_22222222"
+
+
+@pytest.mark.asyncio
+async def test_post_call_failure_triggers_pause_when_all_wallets_exhausted(tmp_path: Path):
+    """Verify post_call_failure hook triggers PauseManager.pause when all wallets exhausted."""
+    keystore_path = tmp_path / "unstoppable_wallets.json"
+    lock_path = tmp_path / "unstoppable_pause.lock"
+
+    wm = WalletManager(keystore_path=keystore_path, auto_create=True)
+    wm.add_wallet("csk_key_solo_11111111", wallet_id="w_solo", set_active=True)
+
+    pm = PauseManager(lock_path=lock_path)
+    assert pm.is_paused() is False
+
+    guard = StripOrphanToolChoiceGuard(wallet_manager=wm, pause_manager=pm)
+    resp = httpx.Response(
+        status_code=402,
+        json={"error": {"reason": "personal_wallet_empty", "canopy_proxy": "CANOPY_AI_CREDITS_PROXY"}},
+        headers={"x-canopy-correlation-id": "req_canopy_final_999"},
+        request=httpx.Request("POST", "https://app.unstoppable.ai/api/v1/llm-proxy/anthropic/v1/messages"),
+    )
+    exc_402 = httpx.HTTPStatusError(
+        message="402 Payment Required: personal_wallet_empty",
+        request=resp.request,
+        response=resp,
+    )
+
+    await guard.async_post_call_failure_hook(
+        request_data={"model": "deepseek-v4-pro", "api_base": "https://app.unstoppable.ai/api/v1/llm-proxy/anthropic"},
+        original_exception=exc_402,
+        user_api_key_dict={},
+    )
+
+    # Keystore has no active wallet, PauseManager is now paused
+    assert wm.has_active_wallet() is False
+    assert pm.is_paused() is True
+    pause_state = pm.get_pause_state()
+    assert pause_state is not None
+    assert pause_state.correlation_id == "req_canopy_final_999"
+    assert "All wallets exhausted" in pause_state.reason
+
+
+@pytest.mark.asyncio
+async def test_pre_call_hook_injects_wallet_manager_active_key(tmp_path: Path):
+    """Verify async_pre_call_hook routes opus to deepseek-v4-pro with dynamic key."""
+    keystore_path = tmp_path / "unstoppable_wallets.json"
+    wm = WalletManager(keystore_path=keystore_path, auto_create=True)
+    wm.add_wallet("csk_pre_call_dynamic_999", wallet_id="w_pre", set_active=True)
+
+    guard = StripOrphanToolChoiceGuard(wallet_manager=wm)
+    data = {
+        "model": "claude-opus-5.5",
+        "stream": False,
+    }
+    res = await guard.async_pre_call_hook(
+        user_api_key_dict={},
+        cache=None,
+        data=data,
+        call_type="acompletion",
+    )
+    assert res["model"] == "deepseek-v4-pro"
+    assert res["stream"] is True
+    assert res["api_key"] == "csk_pre_call_dynamic_999"
+    assert res["extra_headers"]["Authorization"] == "Bearer csk_pre_call_dynamic_999"
+    assert res["extra_headers"]["anthropic-version"] == "2023-06-01"
+
+
+def test_config_yaml_has_router_fallbacks_for_unstoppable_models():
+    """Verify router_settings.fallbacks in config/config.yaml maps deepseek and glm to antigravity-pro."""
+    repo_config = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
+    with open(repo_config, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    fallbacks = cfg.get("router_settings", {}).get("fallbacks", [])
+    fallback_map = {}
+    for item in fallbacks:
+        if isinstance(item, dict):
+            fallback_map.update(item)
+
+    assert "deepseek-v4-pro" in fallback_map
+    assert "antigravity-pro" in fallback_map["deepseek-v4-pro"]
+    assert "glm-5.3-flash" in fallback_map
+    assert "antigravity-pro" in fallback_map["glm-5.3-flash"]
+
+
+def test_zero_forbidden_references_in_tool_choice_guard():
+    """Verify zero forbidden terms in tool_choice_guard.py."""
+    forbidden = "".join(["black", "hole"])
+    guard_source = Path(__file__).resolve().parent.parent / "tool_choice_guard.py"
+    pattern = re.compile(forbidden, re.IGNORECASE)
+    assert not pattern.search(guard_source.read_text(encoding="utf-8")), "Forbidden term found in tool_choice_guard.py"
+
+
+
+
 
 
 

@@ -57,6 +57,8 @@ router_settings:
     - antigravity-opus-4.6: ["antigravity-remote-opus-4.6"]
     - antigravity-flash: ["antigravity-remote-flash-medium"]
     - antigravity-pro: ["antigravity-remote-opus-4.6"]
+    - deepseek-v4-pro: ["antigravity-pro"]
+    - glm-5.3-flash: ["antigravity-pro"]
   model_group_alias:
     "claude-sonnet-5": "antigravity-flash"
     "claude-sonnet-4-6": "antigravity-flash"
