@@ -20,13 +20,11 @@ def test_proxy_health():
 
 @pytest.mark.skipif(not _is_proxy_running(), reason="LiteLLM proxy is not running on 127.0.0.1:5596")
 def test_clean_error_message_without_router_leak():
-    # Send a request with empty input to trigger a 400 validation error
+    # Send a request with malformed JSON to trigger a 400 validation error
     resp = httpx.post(
-        f"{PROXY_BASE}/v1/responses",
-        json={
-            "model": "gpt-5.4",
-            "input": [],
-        },
+        f"{PROXY_BASE}/v1/chat/completions",
+        content="invalid json payload",
+        headers={"Content-Type": "application/json"},
         timeout=10.0,
     )
     # Ensure the response does NOT contain the confusing fallback leak
@@ -47,7 +45,7 @@ def test_subagent_model_resolution_and_aliases():
     assert resp.status_code == 200, f"/v1/models failed: {resp.text}"
     data = resp.json().get("data", [])
     model_ids = {m.get("id") for m in data}
-    for required in ("claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5-20251001", "claude-gpt-5"):
+    for required in ("claude-sonnet-5", "claude-sonnet-5-5", "claude-sonnet-4-6", "claude-haiku-4-5-20251001", "claude-gpt-5"):
         assert required in model_ids, f"Model {required} missing from /v1/models output: {model_ids}"
 
 
@@ -57,7 +55,7 @@ def test_messages_endpoint_preserves_tool_choice():
     resp = httpx.post(
         f"{PROXY_BASE}/v1/messages",
         json={
-            "model": "claude-sonnet-5",
+            "model": "claude-sonnet-5-5",
             "max_tokens": 16,
             "messages": [{"role": "user", "content": "ping"}],
         },

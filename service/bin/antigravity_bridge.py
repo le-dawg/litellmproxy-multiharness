@@ -503,7 +503,7 @@ _cached_model_map_expiry = 0.0
 def discover_ls(force_refresh=False):
     global _cached_ls_info, _cached_ls_expiry
     now = time.time()
-    if not force_refresh and _cached_ls_info and now < _cached_ls_expiry:
+    if not force_refresh and _cached_ls_info:
         try:
             port = int(_cached_ls_info["address"].split(":")[1])
             if port_ready(port):
@@ -533,7 +533,7 @@ def discover_ls(force_refresh=False):
                     "csrf_token": csrf_token,
                 }
                 _cached_ls_info = info
-                _cached_ls_expiry = now + 10.0
+                _cached_ls_expiry = now + 300.0
                 return info
     return None
 
@@ -561,18 +561,17 @@ def port_ready(port):
         return False
 
 
-def ensure_ls(timeout_seconds=30):
+def ensure_ls(timeout_seconds=5):
     info = discover_ls()
     if info:
         return info
-    subprocess.run(["open", "-a", APP_PATH], check=False)
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
+        time.sleep(1)
         info = discover_ls(force_refresh=True)
         if info:
             return info
-        time.sleep(1)
-    raise RuntimeError("Antigravity language server did not become ready")
+    raise RuntimeError("Antigravity language server is not running")
 
 
 def rpc(method, payload):
@@ -633,7 +632,15 @@ def load_model_map(force_refresh=False):
         "antigravity-opus": opus_model,
         "antigravity-sonnet": sonnet_model,
         "claude-opus-5.5": opus_model,
+        "claude-opus-5-5": opus_model,
+        "claude-opus": opus_model,
+        "opus": opus_model,
         "claude-sonnet-5.5": sonnet_model,
+        "claude-sonnet-5-5": sonnet_model,
+        "claude-sonnet": sonnet_model,
+        "sonnet": sonnet_model,
+        "claude-haiku": flash_model,
+        "haiku": flash_model,
         "gemini": gemini_model,
     }
 
@@ -644,6 +651,12 @@ def load_model_map(force_refresh=False):
         if model_id and target:
             model_map[model_id] = target
             model_map[model_id.lower()] = target
+            alt_hyphen = model_id.replace(".", "-")
+            model_map[alt_hyphen] = target
+            model_map[alt_hyphen.lower()] = target
+            alt_dot = re.sub(r"-(\d+)-(\d+)", r"-\1.\2", model_id)
+            model_map[alt_dot] = target
+            model_map[alt_dot.lower()] = target
 
     _cached_model_map = model_map
     _cached_model_map_expiry = now + 30.0
@@ -651,14 +664,61 @@ def load_model_map(force_refresh=False):
 
 
 def resolve_model_name(name):
-    requested = (name or "antigravity-flash").replace("openai/", "")
-    if requested == "antigravity":
+    requested = (name or "antigravity-flash").replace("openai/", "").strip()
+    if requested in ("antigravity", ""):
         requested = "antigravity-flash"
     model_map = load_model_map()
+
+    # Exact or lowercase match
     model = model_map.get(requested) or model_map.get(requested.lower())
-    if not model:
-        raise KeyError(f"Unsupported antigravity model: {requested}")
-    return requested, model
+    if model:
+        return requested, model
+
+    # Try normalized variants: replace '.' with '-' and vice versa
+    norm_hyphen = requested.lower().replace(".", "-")
+    if norm_hyphen in model_map:
+        return requested, model_map[norm_hyphen]
+
+    norm_dot = re.sub(r"-(\d+)-(\d+)", r"-\1.\2", requested.lower())
+    if norm_dot in model_map:
+        return requested, model_map[norm_dot]
+
+    # Keyword / family fallbacks
+    clean = requested.lower().split("/")[-1]
+    if "sonnet" in clean:
+        sonnet = (
+            model_map.get("claude-sonnet-5-5-high")
+            or model_map.get("claude-sonnet-5-5")
+            or model_map.get("claude-sonnet-5.5")
+            or model_map.get("antigravity-sonnet")
+        )
+        if sonnet:
+            return requested, sonnet
+    elif "opus" in clean or "mythos" in clean:
+        opus = (
+            model_map.get("claude-opus-5-5-high")
+            or model_map.get("claude-opus-5-5")
+            or model_map.get("claude-opus-5.5")
+            or model_map.get("antigravity-opus")
+        )
+        if opus:
+            return requested, opus
+    elif "haiku" in clean or "flash" in clean:
+        flash = model_map.get("antigravity-flash") or model_map.get("gemini-3.8-flash-high")
+        if flash:
+            return requested, flash
+    elif "pro" in clean:
+        pro = model_map.get("antigravity-pro")
+        if pro:
+            return requested, pro
+
+    # Graceful fallback to default model instead of hard crashing with 500 KeyError
+    default_model = model_map.get("antigravity-flash") or model_map.get("claude-sonnet-5.5")
+    if default_model:
+        log_service(f"Model '{requested}' not found in model_map, falling back to default '{default_model}'")
+        return requested, default_model
+
+    raise KeyError(f"Unsupported antigravity model: {requested}")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -885,14 +945,24 @@ class Handler(BaseHTTPRequestHandler):
             })
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", "replace")
-            log_service(f"upstream HTTP error: {exc.code}")
-            self.respond_json(502, {
-                "error": {
-                    "message": f"Upstream language server HTTP {exc.code}: {body}",
-                    "type": "bad_gateway",
-                    "code": 502,
-                }
-            })
+            log_service(f"upstream HTTP error: {exc.code} - {body[:120]}")
+            body_lower = body.lower()
+            if exc.code == 499 or "canceled" in body_lower or "context canceled" in body_lower or "stream reading error" in body_lower:
+                self.respond_json(499, {
+                    "error": {
+                        "message": f"Client closed request: {body}",
+                        "type": "client_closed_request",
+                        "code": 499,
+                    }
+                })
+            else:
+                self.respond_json(502, {
+                    "error": {
+                        "message": f"Upstream language server HTTP {exc.code}: {body}",
+                        "type": "bad_gateway",
+                        "code": 502,
+                    }
+                })
         except error.URLError as exc:
             log_service(f"upstream urlerror: {exc}")
             if isinstance(exc.reason, (socket.timeout, TimeoutError)):

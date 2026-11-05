@@ -6,6 +6,8 @@ litellm_settings:
   callbacks:
     - tool_choice_guard.proxy_guard
   model_alias_map:
+    sonnet: claude-sonnet-5-5-high
+    opus: claude-opus-5-5-high
     claude-sonnet-5: antigravity-flash
     claude-sonnet-5[1m]: antigravity-flash
     claude-sonnet-4-6: antigravity-flash
@@ -59,6 +61,16 @@ router_settings:
     - antigravity-pro: ["antigravity-remote-opus-4.6"]
     - deepseek-v4-pro: ["antigravity-pro"]
     - glm-5.3-flash: ["antigravity-pro"]
+    - claude-sonnet-5-5-high: ["antigravity-remote-flash-high"]
+    - claude-sonnet-5-5-medium: ["antigravity-remote-flash-medium"]
+    - claude-sonnet-5-5-low: ["antigravity-remote-flash-low"]
+    - claude-sonnet-5-5: ["antigravity-remote-flash-high"]
+    - antigravity-sonnet: ["antigravity-remote-flash-high"]
+    - claude-opus-5-5-high: ["antigravity-remote-opus-4.6"]
+    - claude-opus-5-5-medium: ["antigravity-remote-opus-4.6"]
+    - claude-opus-5-5-low: ["antigravity-remote-opus-4.6"]
+    - claude-opus-5-5: ["antigravity-remote-opus-4.6"]
+    - antigravity-opus: ["antigravity-remote-opus-4.6"]
   model_group_alias:
     "claude-sonnet-5": "antigravity-flash"
     "claude-sonnet-4-6": "antigravity-flash"
@@ -93,6 +105,90 @@ model_list:
   - model_name: antigravity-opus-4.6
     litellm_params:
       model: openai/claude-opus-4.6-thinking
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: claude-sonnet-5-5-high
+    litellm_params:
+      model: openai/claude-sonnet-5-5-high
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: claude-sonnet-5-5-medium
+    litellm_params:
+      model: openai/claude-sonnet-5-5-medium
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: claude-sonnet-5-5-low
+    litellm_params:
+      model: openai/claude-sonnet-5-5-low
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: claude-sonnet-5-5
+    litellm_params:
+      model: openai/claude-sonnet-5-5-high
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: claude-sonnet-5.5
+    litellm_params:
+      model: openai/claude-sonnet-5-5-high
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: antigravity-sonnet
+    litellm_params:
+      model: openai/antigravity-sonnet
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: claude-opus-5-5-high
+    litellm_params:
+      model: openai/claude-opus-5-5-high
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: claude-opus-5-5-medium
+    litellm_params:
+      model: openai/claude-opus-5-5-medium
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: claude-opus-5-5-low
+    litellm_params:
+      model: openai/claude-opus-5-5-low
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: claude-opus-5-5
+    litellm_params:
+      model: openai/claude-opus-5-5-high
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: claude-opus-5.5
+    litellm_params:
+      model: openai/claude-opus-5-5-high
+      api_base: http://127.0.0.1:8788/v1
+      api_key: sk-antigravity-local
+      use_chat_completions_api: true
+
+  - model_name: antigravity-opus
+    litellm_params:
+      model: openai/antigravity-opus
       api_base: http://127.0.0.1:8788/v1
       api_key: sk-antigravity-local
       use_chat_completions_api: true
