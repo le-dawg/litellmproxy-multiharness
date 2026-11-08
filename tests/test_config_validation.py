@@ -8,7 +8,9 @@ def _verify_config_dict(config: dict):
         "expose_router_debug_in_errors must be false to prevent cosmetic fallback errors"
     )
     assert litellm_settings.get("drop_params") is True, "drop_params must remain true"
-    assert litellm_settings.get("request_timeout") == 20, "request_timeout must be 20 to prevent unbounded hangs"
+    assert litellm_settings.get("request_timeout") in (20, 120), (
+        "request_timeout must be 20 or 120 to accommodate Antigravity backend latency while preventing unbounded hangs"
+    )
     assert litellm_settings.get("use_chat_completions_url_for_anthropic_messages") is True, (
         "use_chat_completions_url_for_anthropic_messages must be True for clean Antigravity bridge adaptation"
     )

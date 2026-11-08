@@ -2,12 +2,12 @@ litellm_settings:
   drop_params: true
   expose_router_debug_in_errors: false
   use_chat_completions_url_for_anthropic_messages: true
-  request_timeout: 20
+  request_timeout: 120
   callbacks:
     - tool_choice_guard.proxy_guard
   model_alias_map:
-    sonnet: claude-sonnet-5-5-high
-    opus: claude-opus-5-5-high
+    sonnet: claude-sonnet-5
+    opus: claude-sonnet-5
     claude-sonnet-5: antigravity-flash
     claude-sonnet-5[1m]: antigravity-flash
     claude-sonnet-4-6: antigravity-flash
