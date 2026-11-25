@@ -135,5 +135,3 @@ def test_router_fallbacks_to_remote_counterparts():
         assert remote in fallback_targets, (
             f"{remote} not in fallback targets for {primary}: {fallback_targets}"
         )
-
-

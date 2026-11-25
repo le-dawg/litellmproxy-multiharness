@@ -22,12 +22,27 @@ STATE_DIR.mkdir(parents=True, exist_ok=True)
 TRAFFIC_LOG = STATE_DIR / "antigravity-traffic.jsonl"
 SERVICE_LOG = STATE_DIR / "antigravity-bridge.log"
 
-BUDDY_REGEX = re.compile(r"<!--\s*buddy:.*?-->", re.DOTALL | re.IGNORECASE)
+BUDDY_OPEN_REGEX = re.compile(r"<!--\s*buddy:", re.IGNORECASE)
 CAVEMAN_BLOCK_REGEX = re.compile(
     r"(?:<system-reminder>\s*)?(?:UserPromptSubmit hook additional context:\s*)?CAVEMAN MODE ACTIVE.*?(?:</system-reminder>|(?=\n\n)|$)",
     re.DOTALL | re.IGNORECASE,
 )
 TOOL_CALL_REGEX = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL | re.IGNORECASE)
+
+
+def strip_buddy_tags(content):
+    parts = []
+    copy_from = 0
+    search_from = 0
+    while match := BUDDY_OPEN_REGEX.search(content, search_from):
+        closing = content.find("-->", match.end())
+        if closing < 0:
+            break
+        parts.append(content[copy_from : match.start()])
+        copy_from = closing + 3
+        search_from = copy_from
+    parts.append(content[copy_from:])
+    return "".join(parts)
 
 
 def log_service(message):
@@ -394,7 +409,7 @@ def messages_to_prompt(messages, tools=None, tool_choice="auto"):
         content = str(flatten_content(msg.get("content")) or "")
 
         # Strip buddy tags
-        content = BUDDY_REGEX.sub("", content).strip()
+        content = strip_buddy_tags(content).strip()
 
         # Deduplicate caveman reminder: omit or clean from earlier turns
         if "CAVEMAN MODE ACTIVE" in content and idx != last_caveman_idx:
