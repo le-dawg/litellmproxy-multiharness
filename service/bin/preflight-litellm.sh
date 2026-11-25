@@ -57,18 +57,18 @@ litellm_settings = config.get("litellm_settings") or {}
 if litellm_settings.get("drop_params") is not True:
     errors.append("litellm_settings.drop_params must be true")
 
-required_aliases = {"claude-gpt-5", "claude-sonnet-4-5"}
+required_azure_aliases = {"inactive-azure-gpt-5.4", "inactive-azure-claude-gpt-5"}
 models = {}
 for item in config.get("model_list") or []:
     name = item.get("model_name")
     if name:
         models[name] = item.get("litellm_params") or {}
 
-missing = sorted(required_aliases - models.keys())
-if missing:
-    errors.append("missing required model aliases: " + ", ".join(missing))
+missing_azure = sorted(required_azure_aliases - models.keys())
+if missing_azure:
+    errors.append("missing required azure model aliases: " + ", ".join(missing_azure))
 
-for alias in sorted(required_aliases & models.keys()):
+for alias in sorted(required_azure_aliases & models.keys()):
     params = models[alias]
     if params.get("model") != expected_model:
         errors.append(f"{alias}: model must be {expected_model}")
@@ -78,6 +78,59 @@ for alias in sorted(required_aliases & models.keys()):
         errors.append(f"{alias}: api_version must be {expected_version}")
     if params.get("api_key") != expected_key_ref:
         errors.append(f"{alias}: api_key must be {expected_key_ref}")
+
+required_antigravity_models = {
+    "antigravity-flash-low",
+    "antigravity-flash-medium",
+    "antigravity-flash-high",
+    "antigravity-opus-4.6",
+}
+missing_antigravity = sorted(required_antigravity_models - models.keys())
+if missing_antigravity:
+    errors.append("missing required antigravity model aliases: " + ", ".join(missing_antigravity))
+
+for alias in sorted(required_antigravity_models & models.keys()):
+    params = models[alias]
+    if params.get("api_base") != "http://127.0.0.1:8788/v1":
+        errors.append(f"{alias}: api_base must be http://127.0.0.1:8788/v1")
+
+required_remote_antigravity_models = {
+    "antigravity-remote-flash-low",
+    "antigravity-remote-flash-medium",
+    "antigravity-remote-flash-high",
+    "antigravity-remote-opus-4.6",
+}
+missing_remote = sorted(required_remote_antigravity_models - models.keys())
+if missing_remote:
+    errors.append("missing required remote antigravity model aliases: " + ", ".join(missing_remote))
+
+for alias in sorted(required_remote_antigravity_models & models.keys()):
+    params = models[alias]
+    if params.get("api_base") != "http://10.147.17.130:8788/v1":
+        errors.append(f"{alias}: api_base must be http://10.147.17.130:8788/v1")
+    if params.get("api_key") != "sk-antigravity-local":
+        errors.append(f"{alias}: api_key must be sk-antigravity-local")
+
+router_settings = config.get("router_settings") or {}
+fallbacks = router_settings.get("fallbacks") or []
+fallback_map = {}
+if isinstance(fallbacks, list):
+    for item in fallbacks:
+        if isinstance(item, dict):
+            fallback_map.update(item)
+
+expected_fallbacks = {
+    "antigravity-flash-low": "antigravity-remote-flash-low",
+    "antigravity-flash-medium": "antigravity-remote-flash-medium",
+    "antigravity-flash-high": "antigravity-remote-flash-high",
+    "antigravity-opus-4.6": "antigravity-remote-opus-4.6",
+}
+for primary, remote in expected_fallbacks.items():
+    targets = fallback_map.get(primary, [])
+    if isinstance(targets, str):
+        targets = [targets]
+    if remote not in targets:
+        errors.append(f"router_settings.fallbacks missing {primary} -> {remote}")
 
 if errors:
     for error in errors:
