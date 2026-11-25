@@ -617,6 +617,10 @@ class TestAdversarialPromptNormalizationLayeredHooks:
         assert "<!-- buddy:" not in prompt
         assert "buddy:" not in prompt
 
+    def test_unterminated_buddy_comment_is_preserved(self):
+        content = "<!-- buddy: unfinished"
+        assert bridge.strip_buddy_tags(content) == content
+
 
 # ===================================================================== #
 #  5. Historical Session Replay with Latency & Synthetic Error Drops    #
